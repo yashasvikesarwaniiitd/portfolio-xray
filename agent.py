@@ -39,8 +39,9 @@ TOOLS = [
     },
     {
         "name": "get_return",
-        "description": "Get the percentage return of a stock or index over a period, computed "
-                       "from closing prices. Use ticker '^NSEI' for the NIFTY 50 index.",
+        "description": "Get the percentage return of ONE stock or index over a period, computed "
+                       "from closing prices. Use ticker '^NSEI' for the NIFTY 50 index. To compare "
+                       "two instruments, use compare_returns instead.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -49,6 +50,23 @@ TOOLS = [
                            "description": "Lookback period"},
             },
             "required": ["ticker", "period"],
+        },
+    },
+    {
+        "name": "compare_returns",
+        "description": "Compare the percentage returns of two stocks/indices over the same period, "
+                       "including the spread and which one outperformed. Always use this (never "
+                       "subtract returns yourself) when comparing two instruments. Use '^NSEI' for "
+                       "the NIFTY 50 index.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker_a": {"type": "string", "description": "first yfinance ticker symbol"},
+                "ticker_b": {"type": "string", "description": "second yfinance ticker symbol"},
+                "period": {"type": "string", "enum": ["5d", "1mo", "3mo", "6mo", "ytd", "1y"],
+                           "description": "Lookback period"},
+            },
+            "required": ["ticker_a", "ticker_b", "period"],
         },
     },
 ]
@@ -65,16 +83,25 @@ def fetch_close(symbol: str) -> str:
     })
 
 
-def fetch_return(symbol: str, period: str) -> str:
+def compute_return(symbol: str, period: str) -> dict:
     hist = yf.Ticker(symbol).history(period=period)
     if hist.empty:
         raise ValueError(f"No data for '{symbol}' — check the ticker symbol.")
     start, end = float(hist["Close"].iloc[0]), float(hist["Close"].iloc[-1])
-    return json.dumps({
+    return {
         "symbol": symbol, "period": period,
         "start_close": round(start, 2), "end_close": round(end, 2),
         "return_pct": round((end - start) / start * 100, 2),
         "from": str(hist.index[0].date()), "to": str(hist.index[-1].date()),
+    }
+
+
+def fetch_compare(ticker_a: str, ticker_b: str, period: str) -> str:
+    a, b = compute_return(ticker_a, period), compute_return(ticker_b, period)
+    spread = round(a["return_pct"] - b["return_pct"], 2)
+    return json.dumps({
+        "a": a, "b": b, "spread_pct_a_minus_b": spread,
+        "outperformer": a["symbol"] if spread > 0 else b["symbol"] if spread < 0 else "equal",
     })
 
 
@@ -85,7 +112,9 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
         if name == "get_index":
             return fetch_close(NIFTY50_SYMBOL), False
         if name == "get_return":
-            return fetch_return(args["ticker"], args["period"]), False
+            return json.dumps(compute_return(args["ticker"], args["period"])), False
+        if name == "compare_returns":
+            return fetch_compare(args["ticker_a"], args["ticker_b"], args["period"]), False
         return f"Unknown tool: {name}", True
     except Exception as e:
         return f"Error: {e}", True
