@@ -10,8 +10,13 @@ import yfinance as yf
 from dotenv import load_dotenv
 from mftool import Mftool
 
+import metrics
+
 MODEL = "claude-haiku-4-5"
 NIFTY50_SYMBOL = "^NSEI"  # yfinance symbol for the NIFTY 50 index
+# Risk-free rate for Sharpe = RBI 10Y G-Sec yield. No reliable free live API exists, so
+# this is UPDATED MANUALLY on a monthly cadence (see CLAUDE.md). Last set 2026-07-21.
+RISK_FREE_RATE = 0.068  # 6.8% p.a.
 DEFAULT_PORTFOLIO = "portfolio.csv"
 # Columns the portfolio CSV must have; the rest are monthly SIP-inflow columns
 # (labelled like "Mar'25") detected by the apostrophe in their name.
@@ -36,11 +41,23 @@ SYSTEM = (
     "Use the portfolio tools to answer questions about the user's own holdings, and the market "
     "tools for prices, returns, indices, history, and mutual-fund NAVs. When you show money, "
     "the figures are Indian Rupees (₹).\n\n"
-    "Note on the portfolio snapshot: the CSV records money invested (SIP inflows), not units, so "
-    "current values are ESTIMATES — units are approximated as invested ÷ average price over the "
-    "accumulation window. Always tell the user these values are approximate. Holdings marked "
-    "'price unavailable' (manual baskets, blank source, or newly-listed symbols with no data) "
-    "have no live price — report them as such, never guess a value, and exclude them from totals."
+    "Tools available:\n"
+    "- portfolio_snapshot: whole-portfolio valuation and P&L (exact unit reconstruction) with "
+    "per-holding and portfolio XIRR.\n"
+    "- portfolio_xirr: money-weighted annualized return for the portfolio and each holding.\n"
+    "- holding_units: exact units, per-SIP breakdown, value and XIRR for one holding.\n"
+    "- beta: a stock/ETF's sensitivity to the NIFTY 50 (not applicable to mutual funds).\n"
+    "- sharpe: portfolio risk-adjusted return.\n"
+    "- concentration: how diversified the portfolio is (weights, HHI, >10% flags).\n"
+    "- load_portfolio, get_price, get_index, get_return, compare_returns, get_nav, "
+    "price_history for holdings listing and market data.\n\n"
+    "Portfolio values now use EXACT unit reconstruction (units per SIP = amount ÷ price on that "
+    "SIP's date, summed), valued at the latest available price — these are computed figures, not "
+    "estimates. Values are 'as of' each holding's latest price date. Holdings marked "
+    "'unavailable' (manual baskets, blank source, or newly-listed symbols with no data) have no "
+    "live price — report them as such, never guess a value, and note they are excluded from "
+    "totals. When you cite beta or Sharpe, briefly state what the number means; never turn it "
+    "into a recommendation."
 )
 
 TOOLS = [
@@ -153,6 +170,60 @@ TOOLS = [
             },
             "required": ["ticker", "period"],
         },
+    },
+    {
+        "name": "portfolio_xirr",
+        "description": "Money-weighted annualized return (XIRR) of the portfolio and of each "
+                       "priced holding, computed by exact unit reconstruction from the SIP "
+                       "cashflows in the CSV. Use this for 'what return am I getting?' style "
+                       "questions. All math is in Python.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "holding_units",
+        "description": "For one holding (by its symbol/AMFI code), reconstruct the exact units "
+                       "held from each SIP's price-on-date, with a per-SIP breakdown, current "
+                       "value and XIRR. Use for 'how many units of X do I hold / how did this "
+                       "one holding do?'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string",
+                           "description": "The holding's symbol or AMFI code as in the CSV, "
+                                          "e.g. 'RELIANCE.NS' or '122639'"},
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "beta",
+        "description": "Market beta of a stock/ETF: the regression slope of its daily returns "
+                       "against the NIFTY 50 over ~2 years. yfinance tickers only — returns "
+                       "'not applicable' for mutual-fund codes. Measures historical sensitivity "
+                       "to the market, not a prediction.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "yfinance ticker, e.g. RELIANCE.NS"},
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "sharpe",
+        "description": "Portfolio Sharpe ratio: value-weighted annualized return minus the "
+                       "risk-free rate (RBI 10Y G-Sec), over annualized volatility, from ~1y of "
+                       "daily data. Reports its assumptions and how much of the portfolio by "
+                       "value it could cover. All math is in Python.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "concentration",
+        "description": "Portfolio concentration: weight of each holding by current value, HHI "
+                       "(sum of squared weights) and effective number of holdings, weight by "
+                       "Market/Type/Risk, and any single holding over 10%. Use for 'how "
+                       "concentrated / diversified is my portfolio?'.",
+        "input_schema": {"type": "object", "properties": {}},
     },
 ]
 
@@ -275,49 +346,6 @@ def read_portfolio(path: str = DEFAULT_PORTFOLIO) -> tuple[list[dict], list[str]
     return holdings, skipped
 
 
-def value_from_avg_cost(total_invested: float, avg_price: float,
-                        current_price: float) -> dict:
-    """Pure valuation math for the avg-cost approximation. Units are ESTIMATED as
-    invested / average price over the accumulation window, then valued at today's price.
-    No network I/O — unit-testable."""
-    units = total_invested / avg_price
-    current_value = units * current_price
-    pnl = current_value - total_invested
-    return {
-        "units_est": round(units, 4),
-        "avg_price_est": round(avg_price, 4),
-        "current_price": round(current_price, 4),
-        "invested": round(total_invested, 2),
-        "current_value_est": round(current_value, 2),
-        "pnl_abs_est": round(pnl, 2),
-        "pnl_pct_est": round(pnl / total_invested * 100, 2) if total_invested else 0.0,
-    }
-
-
-def aggregate_snapshot(rows: list[dict]) -> dict:
-    """Pure aggregation over per-holding results. Totals include only 'priced' holdings;
-    'unavailable' holdings are reported and their invested capital summed separately.
-    No network I/O — unit-testable."""
-    priced = [r for r in rows if r.get("status") == "priced"]
-    total_invested_priced = sum(r["invested"] for r in priced)
-    total_current = sum(r["current_value_est"] for r in priced)
-    total_invested_all = sum(r.get("invested", 0.0) for r in rows)
-    total_pnl = total_current - total_invested_priced
-    return {
-        "holdings": rows,
-        "priced_count": len(priced),
-        "total_count": len(rows),
-        "total_invested_priced": round(total_invested_priced, 2),
-        "total_current_value_est": round(total_current, 2),
-        "total_pnl_abs_est": round(total_pnl, 2),
-        "total_pnl_pct_est": round(total_pnl / total_invested_priced * 100, 2)
-                             if total_invested_priced else 0.0,
-        "unpriced_invested": round(total_invested_all - total_invested_priced, 2),
-        "note": "Current values are ESTIMATES: units approximated as invested / average "
-                "price over the accumulation window, valued at today's price.",
-    }
-
-
 def load_portfolio(path: str = DEFAULT_PORTFOLIO) -> str:
     holdings, skipped = read_portfolio(path)
     listed = [{
@@ -335,81 +363,293 @@ def load_portfolio(path: str = DEFAULT_PORTFOLIO) -> str:
     return json.dumps(out)
 
 
-def _next_month_start(year: int, month: int) -> date:
-    return date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+# --- metrics engine: exact unit reconstruction, XIRR, beta, sharpe, concentration ---
+# The heavy lifting (math) lives in metrics.py as pure functions; the functions below
+# fetch data (mftool for funds, yfinance for stocks/ETFs/crypto) and orchestrate.
 
-
-def _price_series(source: str, symbol: str, start: date, end: date) -> "pd.Series | None":
-    """Fetch a date-indexed closing-price/NAV series for [start, end], or None if no data.
-    yfinance for stocks/ETFs and crypto pairs; mftool historical NAV for mutual funds."""
+def _price_map(source: str, symbol: str, start: date, end: date) -> dict:
+    """Fetch a {date: price} map of closes/NAVs in [start, end]. yfinance for
+    stocks/ETFs/crypto pairs, mftool historical NAV for mutual funds. Empty dict if none."""
     if source in ("yfinance", "crypto"):
         hist = yf.Ticker(symbol).history(start=start.isoformat(),
                                          end=(end + timedelta(days=1)).isoformat())
-        return None if hist.empty else hist["Close"]
+        if hist.empty:
+            return {}
+        # yfinance often appends today's date with a NaN close before data publishes;
+        # drop NaNs so max(pmap) is a real trading day, not a NaN "latest price".
+        return {idx.date(): float(v) for idx, v in hist["Close"].items() if pd.notna(v)}
     if source == "mftool":
         raw = _MF.get_scheme_historical_nav(str(symbol))
         if not raw or not raw.get("data"):
-            return None
-        dates, navs = [], []
+            return {}
+        out = {}
         for d in raw["data"]:
             try:
-                dates.append(pd.Timestamp(datetime.strptime(d["date"], "%d-%m-%Y")))
-                navs.append(float(d["nav"]))
+                dt = datetime.strptime(d["date"], "%d-%m-%Y").date()
+                nav = float(d["nav"])
+                if start <= dt <= end and nav == nav:  # nav == nav filters NaN
+                    out[dt] = nav
             except (ValueError, KeyError, TypeError):
                 continue
-        if not dates:
-            return None
-        s = pd.Series(navs, index=dates).sort_index().loc[
-            pd.Timestamp(start):pd.Timestamp(end)]
-        return s if len(s) else None
-    return None
+        return out
+    return {}
 
 
-def price_holding(h: dict) -> dict:
-    """Value one holding via the avg-cost approximation, routing by its source. Catches its
-    own errors and returns a 'price unavailable' row rather than raising — one bad holding
-    must never crash the whole snapshot."""
+def reconstruct_holding(h: dict, include_breakdown: bool = False) -> dict:
+    """Value one holding by EXACT unit reconstruction, routing by source. SIPs are dated to
+    the 1st of their month; the current value is dated to the latest available price/NAV
+    date (via the walk-back). Catches its own errors and returns 'unavailable' rather than
+    raising — one bad holding must never crash the snapshot. Set include_breakdown to attach
+    the per-SIP price/units detail (used by the holding_units tool, omitted from snapshots)."""
     base = {
         "name": h["name"], "symbol": h["symbol"], "source": h["source"] or "(blank)",
-        "type": h["type"], "invested": round(h["total_invested"], 2),
+        "type": h["type"], "market": h["market"], "risk": h["risk"],
     }
     if h["source"] in ("", "manual") or not h["symbol"]:
-        return {**base, "status": "unavailable",
+        return {**base, "status": "unavailable", "invested": round(h["total_invested"], 2),
                 "reason": "no live-price source (manual basket or blank source)"}
     if not h["inflows"]:
-        return {**base, "status": "unavailable",
-                "reason": "no recorded SIP inflows to estimate units from"}
+        return {**base, "status": "unavailable", "invested": round(h["total_invested"], 2),
+                "reason": "no recorded SIP inflows to reconstruct units from"}
     try:
-        first_y, first_m, _ = h["inflows"][0]
-        last_y, last_m, _ = h["inflows"][-1]
-        start = date(first_y, first_m, 1)
+        # Fetch a 15-day buffer before the first SIP so the weekend/holiday walk-back
+        # (e.g. a SIP dated to a Saturday) has an earlier price to fall back to.
+        start = date(h["inflows"][0][0], h["inflows"][0][1], 1) - timedelta(days=15)
         today = date.today()
-        series = _price_series(h["source"], h["symbol"], start, today)
-        if series is None or len(series) == 0:
+        pmap = _price_map(h["source"], h["symbol"], start, today)
+        if not pmap:
             return {**base, "status": "unavailable",
+                    "invested": round(h["total_invested"], 2),
                     "reason": "no price data for this period (possibly newly listed)"}
-        current_price = float(series.iloc[-1])
-        # Average over the accumulation window only (first inflow -> end of last inflow month).
-        acc_upper = min(_next_month_start(last_y, last_m), today + timedelta(days=1))
-        idx_dates = [ts.date() for ts in series.index]
-        acc = [v for d, v in zip(idx_dates, series.values) if d < acc_upper]
-        avg_price = float(sum(acc) / len(acc)) if acc else float(series.mean())
-        if avg_price <= 0:
-            return {**base, "status": "unavailable", "reason": "non-positive average price"}
-        vals = value_from_avg_cost(h["total_invested"], avg_price, current_price)
-        return {**base, "status": "priced", "price_as_of": str(series.index[-1].date()),
-                **vals}
+        price_date = max(pmap)
+        latest_price = pmap[price_date]
+        priced_flows = [
+            {"date": date(y, m, 1), "amount": amt,
+             "price": metrics.nav_on_or_before(pmap, date(y, m, 1))}
+            for (y, m, amt) in h["inflows"]
+        ]
+        rec = metrics.reconstruct_units(priced_flows)
+        if rec["priced_sips"] == 0 or rec["total_units"] == 0:
+            return {**base, "status": "unavailable",
+                    "invested": round(h["total_invested"], 2),
+                    "reason": "no SIP could be priced (instrument likely listed after the "
+                              "SIP dates)"}
+        invested = rec["invested_priced"]
+        current_value = rec["total_units"] * latest_price
+        pnl = current_value - invested
+        # Per-holding XIRR: each priced SIP is a dated outflow, current value the final inflow.
+        cashflows = [(f["date"], -f["amount"]) for f in priced_flows if f["price"]]
+        cashflows.append((price_date, current_value))
+        try:
+            xirr_pct = round(metrics.xirr(cashflows) * 100, 2)
+        except ValueError as e:
+            xirr_pct = None
+            xirr_note = str(e)
+        row = {
+            **base, "status": "priced",
+            "units": round(rec["total_units"], 4),
+            "invested": invested,
+            "current_value": round(current_value, 2),
+            "current_price": round(latest_price, 4),
+            "price_date": str(price_date),
+            "pnl_abs": round(pnl, 2),
+            "pnl_pct": round(pnl / invested * 100, 2) if invested else 0.0,
+            "xirr_pct": xirr_pct,
+            "priced_sips": rec["priced_sips"], "total_sips": rec["total_sips"],
+        }
+        if rec["invested_unpriced"]:
+            row["invested_unpriced"] = rec["invested_unpriced"]  # SIPs before price history
+        if xirr_pct is None:
+            row["xirr_note"] = xirr_note
+        if include_breakdown:
+            row["breakdown"] = rec["breakdown"]
+        return row
     except Exception as e:  # any provider hiccup -> unavailable, never crash the snapshot
-        return {**base, "status": "unavailable", "reason": f"price fetch failed: {e}"}
+        return {**base, "status": "unavailable", "invested": round(h["total_invested"], 2),
+                "reason": f"price fetch/reconstruction failed: {e}"}
+
+
+def aggregate_snapshot(rows: list[dict]) -> dict:
+    """Pure aggregation over reconstructed holdings, plus a whole-portfolio XIRR pooling
+    every priced SIP cashflow. Totals include only 'priced' holdings; unavailable holdings'
+    invested capital is reported separately."""
+    priced = [r for r in rows if r.get("status") == "priced"]
+    total_invested = sum(r["invested"] for r in priced)
+    total_current = sum(r["current_value"] for r in priced)
+    total_pnl = total_current - total_invested
+    unpriced_invested = sum(r.get("invested", 0.0) for r in rows
+                            if r.get("status") != "priced")
+    return {
+        "holdings": rows,
+        "priced_count": len(priced),
+        "total_count": len(rows),
+        "total_invested": round(total_invested, 2),
+        "total_current_value": round(total_current, 2),
+        "total_pnl_abs": round(total_pnl, 2),
+        "total_pnl_pct": round(total_pnl / total_invested * 100, 2) if total_invested else 0.0,
+        "unpriced_invested": round(unpriced_invested, 2),
+        "method": "Exact unit reconstruction: units per SIP = amount / price-on-date, valued "
+                  "at the latest available price. Values are as of each holding's price_date.",
+    }
+
+
+def _portfolio_xirr(holdings: list[dict], rows: list[dict]) -> "float | None":
+    """Whole-portfolio XIRR: pool every priced holding's SIP outflows with its current value
+    (dated to its price_date). Pure metrics.xirr does the solve. None if not computable."""
+    cashflows = []
+    for h, r in zip(holdings, rows):
+        if r.get("status") != "priced":
+            continue
+        pdate = date.fromisoformat(r["price_date"])
+        for (y, m, amt) in h["inflows"]:
+            if date(y, m, 1) <= pdate:
+                cashflows.append((date(y, m, 1), -amt))
+        cashflows.append((pdate, r["current_value"]))
+    if len(cashflows) < 2:
+        return None
+    try:
+        return round(metrics.xirr(cashflows) * 100, 2)
+    except ValueError:
+        return None
 
 
 def fetch_snapshot(path: str = DEFAULT_PORTFOLIO) -> str:
     holdings, skipped = read_portfolio(path)
-    rows = [price_holding(h) for h in holdings]
+    rows = [reconstruct_holding(h) for h in holdings]
     snap = aggregate_snapshot(rows)
+    snap["portfolio_xirr_pct"] = _portfolio_xirr(holdings, rows)
     if skipped:
         snap["skipped_rows"] = skipped
     return json.dumps(snap)
+
+
+def fetch_holding_units(symbol: str, path: str = DEFAULT_PORTFOLIO) -> str:
+    holdings, _ = read_portfolio(path)
+    code = str(symbol).strip()
+    match = [h for h in holdings if h["symbol"] and str(h["symbol"]).lower() == code.lower()]
+    if not match:
+        raise ValueError(f"No holding with symbol '{code}' found in the portfolio.")
+    return json.dumps(reconstruct_holding(match[0], include_breakdown=True))
+
+
+def fetch_portfolio_xirr(path: str = DEFAULT_PORTFOLIO) -> str:
+    holdings, _ = read_portfolio(path)
+    rows = [reconstruct_holding(h) for h in holdings]
+    per_holding = [{"name": r["name"], "symbol": r["symbol"], "xirr_pct": r.get("xirr_pct")}
+                   for r in rows if r.get("status") == "priced"]
+    return json.dumps({
+        "portfolio_xirr_pct": _portfolio_xirr(holdings, rows),
+        "per_holding": per_holding,
+        "priced_count": len(per_holding),
+        "note": "XIRR is the money-weighted annualized return. Portfolio XIRR pools every "
+                "priced SIP cashflow; per-holding XIRR uses that holding's own cashflows.",
+    })
+
+
+def fetch_beta(symbol: str, period: str = "2y") -> str:
+    """Beta = OLS slope of the holding's daily returns on NIFTY 50 daily returns."""
+    code = str(symbol).strip()
+    if code.isdigit():  # numeric AMFI code -> a mutual fund
+        return json.dumps({
+            "symbol": code, "beta": None, "applicable": False,
+            "reason": "Beta versus an equity index is not applicable to mutual funds. "
+                      "Provide a stock/ETF ticker (e.g. RELIANCE.NS).",
+        })
+    stock_hist = yf.Ticker(code).history(period=period)
+    if stock_hist.empty:
+        raise ValueError(f"No price data for '{code}' — check the ticker symbol.")
+    stock = stock_hist["Close"]
+    market = yf.Ticker(NIFTY50_SYMBOL).history(period=period)["Close"]
+    if market.empty:
+        raise ValueError("No data for the NIFTY 50 index.")
+    joined = pd.concat([stock.rename("s"), market.rename("m")], axis=1, join="inner").dropna()
+    rets = joined.pct_change().dropna()
+    if len(rets) < 30:
+        raise ValueError("Not enough overlapping trading days to estimate beta.")
+    beta = metrics.regression_slope(rets["s"].tolist(), rets["m"].tolist())
+    return json.dumps({
+        "symbol": code, "applicable": True, "beta": round(beta, 3),
+        "benchmark": "NIFTY 50", "period": period, "n_obs": len(rets),
+        "note": "Beta of the daily returns vs NIFTY 50: ~1 moves with the market, >1 more "
+                "volatile than the market, <1 less volatile. Historical, not a prediction.",
+    })
+
+
+def _holding_series_and_value(h: dict, lookback_days: int = 370):
+    """For Sharpe: reconstruct current value and return the last ~1y of closes/NAVs as a
+    date-indexed Series, from a single price fetch. (None, None) if not usable."""
+    if h["source"] in ("", "manual") or not h["symbol"] or not h["inflows"]:
+        return None, None
+    start = date(h["inflows"][0][0], h["inflows"][0][1], 1) - timedelta(days=15)
+    today = date.today()
+    pmap = _price_map(h["source"], h["symbol"], start, today)
+    if not pmap:
+        return None, None
+    latest = pmap[max(pmap)]
+    priced = [{"date": date(y, m, 1), "amount": amt,
+               "price": metrics.nav_on_or_before(pmap, date(y, m, 1))}
+              for (y, m, amt) in h["inflows"]]
+    value = metrics.reconstruct_units(priced)["total_units"] * latest
+    cutoff = today - timedelta(days=lookback_days)
+    s = pd.Series({pd.Timestamp(d): p for d, p in pmap.items() if d >= cutoff}).sort_index()
+    return value, s
+
+
+def fetch_sharpe(path: str = DEFAULT_PORTFOLIO) -> str:
+    """Portfolio Sharpe: value-weighted daily returns over the common daily-data window,
+    annualized (252 days), minus the manually-set risk-free rate, over annualized volatility.
+    Holdings with under ~150 days of history are excluded; coverage is reported."""
+    holdings, _ = read_portfolio(path)
+    values, series = {}, {}
+    for i, h in enumerate(holdings):
+        try:
+            v, s = _holding_series_and_value(h)
+        except Exception:
+            v, s = None, None
+        # Require a substantial history (>= ~150 trading days) so newly-listed holdings
+        # don't shrink the common-date window every series must share.
+        if v and s is not None and len(s) >= 150:
+            values[i], series[i] = v, s
+    if len(series) < 2:
+        raise ValueError("Not enough holdings with a full year of history to compute Sharpe.")
+    rets = pd.DataFrame({i: series[i] for i in series}).pct_change().dropna()
+    if len(rets) < 30:
+        raise ValueError("Not enough overlapping trading days to compute Sharpe.")
+    total = sum(values.values())
+    weights = {i: values[i] / total for i in values}
+    port_daily = sum(rets[i] * weights[i] for i in values)
+    ann = metrics.annualize(port_daily.tolist())
+    sharpe = metrics.sharpe_ratio(ann["ann_return"], ann["ann_volatility"], RISK_FREE_RATE)
+    return json.dumps({
+        "sharpe_ratio": round(sharpe, 3),
+        "ann_return_pct": round(ann["ann_return"] * 100, 2),
+        "ann_volatility_pct": round(ann["ann_volatility"] * 100, 2),
+        "risk_free_rate_pct": round(RISK_FREE_RATE * 100, 2),
+        "trading_days": ann["n_obs"],
+        "holdings_covered": len(values),
+        "value_covered": round(total, 2),
+        "assumptions": "Value-weighted daily returns over the largest window of daily data "
+                       "common to all covered holdings (see trading_days), annualized at 252 "
+                       "trading days; risk-free = RBI 10Y G-Sec (manually set constant). "
+                       "Holdings without >=150 days of daily history are excluded — see "
+                       "holdings_covered and value_covered for coverage.",
+    })
+
+
+def fetch_concentration(path: str = DEFAULT_PORTFOLIO) -> str:
+    holdings, _ = read_portfolio(path)
+    rows = [reconstruct_holding(h) for h in holdings]
+    priced = [{"name": r["name"], "value": r["current_value"], "market": r["market"],
+               "type": r["type"], "risk": r["risk"]}
+              for r in rows if r.get("status") == "priced"]
+    if not priced:
+        raise ValueError("No priced holdings available to measure concentration.")
+    stats = metrics.concentration_stats(priced)
+    stats["priced_count"] = len(priced)
+    stats["total_count"] = len(rows)
+    stats["note"] = ("Weights are by current value. HHI is the sum of squared fractional "
+                     "weights (higher = more concentrated); effective_holdings = 1/HHI.")
+    return json.dumps(stats)
 
 
 def fetch_nav(fund_code: str) -> str:
@@ -473,6 +713,16 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
             return fetch_nav(args["fund_code"]), False
         if name == "price_history":
             return fetch_price_history(args["ticker"], args["period"]), False
+        if name == "portfolio_xirr":
+            return fetch_portfolio_xirr(), False
+        if name == "holding_units":
+            return fetch_holding_units(args["symbol"]), False
+        if name == "beta":
+            return fetch_beta(args["symbol"]), False
+        if name == "sharpe":
+            return fetch_sharpe(), False
+        if name == "concentration":
+            return fetch_concentration(), False
         return f"Unknown tool: {name}", True
     except Exception as e:
         return f"Error: {e}", True
