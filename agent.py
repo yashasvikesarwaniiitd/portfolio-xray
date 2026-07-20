@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 from mftool import Mftool
 
 import metrics
+import refusals
+import router
 
 MODEL = "claude-haiku-4-5"
 NIFTY50_SYMBOL = "^NSEI"  # yfinance symbol for the NIFTY 50 index
@@ -57,7 +59,11 @@ SYSTEM = (
     "'unavailable' (manual baskets, blank source, or newly-listed symbols with no data) have no "
     "live price — report them as such, never guess a value, and note they are excluded from "
     "totals. When you cite beta or Sharpe, briefly state what the number means; never turn it "
-    "into a recommendation."
+    "into a recommendation.\n\n"
+    "A query router runs before you and only sends you analytics and education questions; "
+    "advice-seeking and off-topic queries are handled elsewhere. Still, if any buy/sell/hold "
+    "or prediction ask reaches you, decline it and offer analytics instead — you are the "
+    "backstop, not the first line."
 )
 
 TOOLS = [
@@ -728,29 +734,86 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
         return f"Error: {e}", True
 
 
-def turn(client: anthropic.Anthropic, messages: list) -> str:
+def turn(client: anthropic.Anthropic, messages: list, tools: list | None = None,
+         tools_used: list | None = None) -> str:
+    """Run the tool-calling loop until the model answers in text. `tools` defaults to the
+    full tool set; pass [] for a no-tools turn (education). Tool names actually called are
+    appended to `tools_used` if provided (used by the eval harness for tool-correctness)."""
+    tools = TOOLS if tools is None else tools
     while True:
-        resp = client.messages.create(model=MODEL, max_tokens=1024, system=SYSTEM,
-                                      tools=TOOLS, messages=messages)
+        kwargs = {"model": MODEL, "max_tokens": 1024, "system": SYSTEM, "messages": messages}
+        if tools:
+            kwargs["tools"] = tools
+        resp = client.messages.create(**kwargs)
         messages.append({"role": "assistant", "content": resp.content})
         if resp.stop_reason != "tool_use":
             return next((b.text for b in resp.content if b.type == "text"), "")
         results = []
         for block in resp.content:
             if block.type == "tool_use":
+                if tools_used is not None:
+                    tools_used.append(block.name)
                 content, is_error = run_tool(block.name, block.input)
                 results.append({"type": "tool_result", "tool_use_id": block.id,
                                 "content": content, "is_error": is_error})
         messages.append({"role": "user", "content": results})
 
 
+# Canned responses for the short-circuit categories (no model call, no tools).
+OFFTOPIC_REDIRECT = (
+    "That's outside what I do — I'm Portfolio X-Ray, an analytics assistant for your "
+    "investments. Ask me about your portfolio's value, returns (XIRR), risk (beta, Sharpe, "
+    "concentration), a fund's NAV, or a stock's price history."
+)
+NEWS_STUB = (
+    "I can't pull news yet — a citable news tool is planned for a later version. For now I can "
+    "help with analytics: your holdings' value, XIRR, beta, Sharpe, concentration, NAVs, and "
+    "price history."
+)
+
+
+def answer_query(client: anthropic.Anthropic, messages: list, user_text: str,
+                 state: dict | None = None) -> dict:
+    """Route the query, then dispatch. `advice` and `offtopic` short-circuit before any tool
+    runs; `news` returns a stub; `education` answers with no tools; `analytics` runs the tool
+    loop. `state` tracks the consecutive-refusal streak so we harden the refusal on repeats.
+    Returns {category, answer, tools_used, refused, subtype?}."""
+    state = {} if state is None else state
+    route = router.classify(client, user_text)
+    category = route["category"]
+    messages.append({"role": "user", "content": user_text})
+
+    if category == "advice":
+        state["advice_streak"] = state.get("advice_streak", 0) + 1
+        ref = refusals.refuse(user_text, repeat=state["advice_streak"] - 1)
+        messages.append({"role": "assistant", "content": ref["message"]})
+        return {"category": category, "answer": ref["message"], "tools_used": [],
+                "refused": True, "subtype": ref["subtype"]}
+
+    state["advice_streak"] = 0  # any non-advice query resets the streak
+    if category == "offtopic":
+        messages.append({"role": "assistant", "content": OFFTOPIC_REDIRECT})
+        return {"category": category, "answer": OFFTOPIC_REDIRECT, "tools_used": [],
+                "refused": False}
+    if category == "news":
+        messages.append({"role": "assistant", "content": NEWS_STUB})
+        return {"category": category, "answer": NEWS_STUB, "tools_used": [], "refused": False}
+
+    tools_used: list = []
+    tools = [] if category == "education" else TOOLS  # education answers without tools
+    answer = turn(client, messages, tools=tools, tools_used=tools_used)
+    return {"category": category, "answer": answer, "tools_used": tools_used,
+            "refused": False}
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows console can't print ₹ by default
     load_dotenv()  # ANTHROPIC_API_KEY from .env
     client = anthropic.Anthropic()
-    messages = []
-    print("Portfolio X-Ray agent — ask about your portfolio, prices, returns, "
-          "history, indices, or fund NAVs (Ctrl+C to quit)")
+    messages: list = []
+    state: dict = {}
+    print("Portfolio X-Ray agent — ask about your portfolio, prices, returns, risk "
+          "(XIRR, beta, Sharpe, concentration), or fund NAVs (Ctrl+C to quit)")
     while True:
         try:
             user = input("\nyou> ").strip()
@@ -758,8 +821,8 @@ def main():
             break
         if not user:
             continue
-        messages.append({"role": "user", "content": user})
-        print(turn(client, messages))
+        result = answer_query(client, messages, user, state)
+        print(result["answer"])
 
 
 if __name__ == "__main__":
