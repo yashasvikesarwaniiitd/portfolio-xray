@@ -1,63 +1,94 @@
 """Unit tests for the network-free pure functions behind the metric tools.
 
-Per CLAUDE.md: every metric tool is a pure function with unit tests before it
-becomes a tool. These cover the P&L math (compute_snapshot) and CSV parsing
-(read_portfolio); the yfinance/mftool fetch wrappers are exercised manually.
+Per CLAUDE.md: every metric tool is a pure function with unit tests before it becomes a
+tool. These cover the valuation math (value_from_avg_cost), portfolio aggregation
+(aggregate_snapshot), month-label parsing, and CSV parsing (read_portfolio) against the
+real portfolio schema. The yfinance/mftool fetch wrappers are exercised manually.
 Run with: uv run pytest
 """
 import pytest
 
-from agent import compute_snapshot, read_portfolio
+from agent import (
+    aggregate_snapshot,
+    parse_month_label,
+    read_portfolio,
+    value_from_avg_cost,
+)
+
+REAL_HEADER = ("Mode,App,Type,Market,Risk,Where,symbol,source,"
+               '"Estimated Returns (3Y)",Total Invested,'
+               "Mar'25,April'25,May'25,June'25,July'25\n")
 
 
-# --- compute_snapshot: the arithmetic the LLM is never allowed to do itself ---
+# --- value_from_avg_cost: the estimate arithmetic the LLM must never do itself ---
 
-def test_snapshot_basic_gain_and_loss():
-    holdings = [
-        {"ticker": "A.NS", "quantity": 10, "buy_price": 100.0, "buy_date": "2024-01-01"},
-        {"ticker": "B.NS", "quantity": 5, "buy_price": 200.0, "buy_date": "2024-01-01"},
+def test_value_basic_gain():
+    # invested 1000 at avg price 100 -> 10 units; now 150 -> value 1500, +50%
+    v = value_from_avg_cost(1000.0, 100.0, 150.0)
+    assert v["units_est"] == 10.0
+    assert v["current_value_est"] == 1500.0
+    assert v["pnl_abs_est"] == 500.0
+    assert v["pnl_pct_est"] == 50.0
+
+
+def test_value_loss():
+    v = value_from_avg_cost(1000.0, 100.0, 80.0)
+    assert v["current_value_est"] == 800.0
+    assert v["pnl_abs_est"] == -200.0
+    assert v["pnl_pct_est"] == -20.0
+
+
+def test_value_zero_invested_no_divide_by_zero():
+    v = value_from_avg_cost(0.0, 100.0, 150.0)
+    assert v["pnl_pct_est"] == 0.0
+
+
+# --- aggregate_snapshot: totals include only priced holdings ---
+
+def test_aggregate_excludes_unavailable_from_totals():
+    rows = [
+        {"status": "priced", "invested": 1000.0, "current_value_est": 1500.0},
+        {"status": "priced", "invested": 1000.0, "current_value_est": 900.0},
+        {"status": "unavailable", "invested": 500.0, "reason": "manual"},
     ]
-    prices = {"A.NS": 150.0, "B.NS": 180.0}  # A up 50%, B down 10%
-    snap = compute_snapshot(holdings, prices)
-
-    a, b = snap["holdings"]
-    assert a["invested"] == 1000.0 and a["current_value"] == 1500.0
-    assert a["pnl_abs"] == 500.0 and a["pnl_pct"] == 50.0
-    assert b["invested"] == 1000.0 and b["current_value"] == 900.0
-    assert b["pnl_abs"] == -100.0 and b["pnl_pct"] == -10.0
-
-    assert snap["total_invested"] == 2000.0
-    assert snap["total_current_value"] == 2400.0
-    assert snap["total_pnl_abs"] == 400.0
-    assert snap["total_pnl_pct"] == 20.0
-    assert snap["priced_holdings"] == 2 and snap["total_holdings"] == 2
+    snap = aggregate_snapshot(rows)
+    assert snap["priced_count"] == 2 and snap["total_count"] == 3
+    assert snap["total_invested_priced"] == 2000.0
+    assert snap["total_current_value_est"] == 2400.0
+    assert snap["total_pnl_abs_est"] == 400.0
+    assert snap["total_pnl_pct_est"] == 20.0
+    assert snap["unpriced_invested"] == 500.0  # the manual holding's capital, kept visible
 
 
-def test_snapshot_fractional_quantity():
-    holdings = [{"ticker": "MF", "quantity": 12.5, "buy_price": 40.0, "buy_date": "2024-01-01"}]
-    snap = compute_snapshot(holdings, {"MF": 44.0})
-    row = snap["holdings"][0]
-    assert row["invested"] == 500.0 and row["current_value"] == 550.0
-    assert row["pnl_abs"] == 50.0 and row["pnl_pct"] == 10.0
+def test_aggregate_all_unavailable_no_divide_by_zero():
+    rows = [{"status": "unavailable", "invested": 500.0, "reason": "x"}]
+    snap = aggregate_snapshot(rows)
+    assert snap["priced_count"] == 0
+    assert snap["total_pnl_pct_est"] == 0.0
+    assert snap["unpriced_invested"] == 500.0
 
 
-def test_snapshot_missing_price_excluded_from_totals():
-    holdings = [
-        {"ticker": "A.NS", "quantity": 10, "buy_price": 100.0, "buy_date": "2024-01-01"},
-        {"ticker": "BAD.NS", "quantity": 5, "buy_price": 50.0, "buy_date": "2024-01-01"},
-    ]
-    snap = compute_snapshot(holdings, {"A.NS": 100.0})  # no price for BAD.NS
-    assert snap["priced_holdings"] == 1 and snap["total_holdings"] == 2
-    assert snap["total_invested"] == 1000.0  # BAD.NS's 250 invested is excluded
-    assert any(r.get("error") for r in snap["holdings"])
+# --- parse_month_label: inconsistent 3-letter / full month names ---
+
+@pytest.mark.parametrize("label,expected", [
+    ("Mar'25", (2025, 3)),
+    ("April'25", (2025, 4)),
+    ("June'25", (2025, 6)),
+    ("July'25", (2025, 7)),
+    ("Dec'25", (2025, 12)),
+    ("Jan'26", (2026, 1)),
+    ("Feb'27", (2027, 2)),
+])
+def test_parse_month_label(label, expected):
+    assert parse_month_label(label) == expected
 
 
-def test_snapshot_empty_holdings_no_divide_by_zero():
-    snap = compute_snapshot([], {})
-    assert snap["total_invested"] == 0.0 and snap["total_pnl_pct"] == 0.0
+def test_parse_month_label_bad_raises():
+    with pytest.raises(ValueError):
+        parse_month_label("notamonth'25")
 
 
-# --- read_portfolio: parsing and graceful failure ---
+# --- read_portfolio: real multi-source schema ---
 
 def _write(tmp_path, text):
     p = tmp_path / "portfolio.csv"
@@ -65,33 +96,43 @@ def _write(tmp_path, text):
     return str(p)
 
 
-def test_read_portfolio_valid(tmp_path):
-    path = _write(tmp_path, "ticker,quantity,buy_price,buy_date\n"
-                            "RELIANCE.NS,10,2450,2024-03-15\n"
-                            "INFY.NS,25,1420,2024-07-02\n")
+def test_read_portfolio_multisource(tmp_path):
+    path = _write(tmp_path, REAL_HEADER +
+        'Equity,Groww,Share,India,Med,Ashoka,ASHOKABLDCON.NS,yfinance,-,14703,-,-,-,1653,5495\n'
+        'Equity,Groww,Mutual Fund,Global,High,Axis FoF,148485,mftool,-,11000,-,-,-,1000,1000\n'
+        'Crypto,Groww,Crypto,Global,High,Bitcoin,BTC-USD,crypto,-,5000,-,-,-,5000,-\n'
+        'Equity,X,Basket,India,Med,Smallcase,,manual,-,6113,-,-,-,-,-\n')
     holdings, skipped = read_portfolio(path)
     assert skipped == []
-    assert len(holdings) == 2
-    assert holdings[0] == {"ticker": "RELIANCE.NS", "quantity": 10.0,
-                           "buy_price": 2450.0, "buy_date": "2024-03-15"}
+    assert len(holdings) == 4
+    by_name = {h["name"]: h for h in holdings}
+
+    fund = by_name["Axis FoF"]
+    assert fund["source"] == "mftool" and fund["symbol"] == "148485"
+    assert fund["total_invested"] == 11000.0
+    assert fund["inflows"] == [(2025, 6, 1000.0), (2025, 7, 1000.0)]
+
+    manual = by_name["Smallcase"]
+    assert manual["source"] == "manual" and manual["symbol"] is None
+    assert manual["inflows"] == []  # all months blank/'-'
 
 
-def test_read_portfolio_tolerates_bom_header(tmp_path):
-    # The shipped sample CSV has a UTF-8 BOM on the first column name.
-    path = _write(tmp_path, "﻿ticker,quantity,buy_price,buy_date\nTCS.NS,5,3890,2025-01-20\n")
+def test_read_portfolio_blank_source_preserved(tmp_path):
+    # 5th, undocumented source case: blank source must parse (not crash) and stay blank.
+    path = _write(tmp_path, REAL_HEADER +
+        'Equity,X,Share,India,Med,Mystery,SOMETHING.NS,,-,2000,-,-,-,2000,-\n')
     holdings, _ = read_portfolio(path)
-    assert holdings[0]["ticker"] == "TCS.NS"
+    assert holdings[0]["source"] == ""
+    assert holdings[0]["symbol"] == "SOMETHING.NS"
 
 
-def test_read_portfolio_skips_malformed_rows(tmp_path):
-    path = _write(tmp_path, "ticker,quantity,buy_price,buy_date\n"
-                            "GOOD.NS,10,100,2024-01-01\n"
-                            "BAD.NS,notanumber,100,2024-01-01\n"
-                            ",5,50,2024-01-01\n"
-                            "NEG.NS,-3,50,2024-01-01\n")
-    holdings, skipped = read_portfolio(path)
-    assert [h["ticker"] for h in holdings] == ["GOOD.NS"]
-    assert len(skipped) == 3  # bad qty, empty ticker, negative qty
+def test_read_portfolio_bom_and_dashes(tmp_path):
+    # BOM on first header cell; '-' inflow cells count as zero.
+    path = _write(tmp_path, "﻿" + REAL_HEADER +
+        'Equity,Groww,Share,India,Med,Ashoka,ASHOKABLDCON.NS,yfinance,-,14703,-,-,-,-,-\n')
+    holdings, _ = read_portfolio(path)
+    assert holdings[0]["name"] == "Ashoka"
+    assert holdings[0]["inflows"] == []
 
 
 def test_read_portfolio_missing_file_raises():
@@ -100,12 +141,6 @@ def test_read_portfolio_missing_file_raises():
 
 
 def test_read_portfolio_missing_column_raises(tmp_path):
-    path = _write(tmp_path, "ticker,quantity\nA.NS,10\n")
+    path = _write(tmp_path, "Where,symbol\nAshoka,ASHOKABLDCON.NS\n")
     with pytest.raises(ValueError, match="missing required column"):
-        read_portfolio(path)
-
-
-def test_read_portfolio_all_rows_bad_raises(tmp_path):
-    path = _write(tmp_path, "ticker,quantity,buy_price,buy_date\nA.NS,bad,bad,x\n")
-    with pytest.raises(ValueError, match="No valid holdings"):
         read_portfolio(path)

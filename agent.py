@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+from datetime import date, datetime, timedelta
 
 import anthropic
 import pandas as pd
@@ -12,7 +13,11 @@ from mftool import Mftool
 MODEL = "claude-haiku-4-5"
 NIFTY50_SYMBOL = "^NSEI"  # yfinance symbol for the NIFTY 50 index
 DEFAULT_PORTFOLIO = "portfolio.csv"
-PORTFOLIO_COLUMNS = ["ticker", "quantity", "buy_price", "buy_date"]
+# Columns the portfolio CSV must have; the rest are monthly SIP-inflow columns
+# (labelled like "Mar'25") detected by the apostrophe in their name.
+REQUIRED_COLUMNS = ["Where", "symbol", "source", "Total Invested"]
+_MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+           "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
 
 _MF = Mftool()  # AMFI daily NAV feed client; construction does no network I/O
 
@@ -30,7 +35,12 @@ SYSTEM = (
     "calculating or estimating it in your head.\n\n"
     "Use the portfolio tools to answer questions about the user's own holdings, and the market "
     "tools for prices, returns, indices, history, and mutual-fund NAVs. When you show money, "
-    "the figures are Indian Rupees (₹)."
+    "the figures are Indian Rupees (₹).\n\n"
+    "Note on the portfolio snapshot: the CSV records money invested (SIP inflows), not units, so "
+    "current values are ESTIMATES — units are approximated as invested ÷ average price over the "
+    "accumulation window. Always tell the user these values are approximate. Holdings marked "
+    "'price unavailable' (manual baskets, blank source, or newly-listed symbols with no data) "
+    "have no live price — report them as such, never guess a value, and exclude them from totals."
 )
 
 TOOLS = [
@@ -88,10 +98,11 @@ TOOLS = [
     },
     {
         "name": "load_portfolio",
-        "description": "Load the user's portfolio from their CSV file (columns: ticker, "
-                       "quantity, buy_price, buy_date) and list the holdings. Use this to see "
-                       "what the user owns before answering portfolio questions. Does NOT fetch "
-                       "current prices — use portfolio_snapshot for valuation and P&L.",
+        "description": "Load the user's portfolio from their CSV and list the holdings with their "
+                       "name, symbol, data source (yfinance/mftool/crypto/manual), category, "
+                       "amount invested, and number of SIP-inflow months. Use this to see what "
+                       "the user owns before answering portfolio questions. Does NOT fetch prices "
+                       "— use portfolio_snapshot for valuation.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -99,11 +110,15 @@ TOOLS = [
     },
     {
         "name": "portfolio_snapshot",
-        "description": "Value the user's entire portfolio: fetches the current price of every "
-                       "holding and returns per-holding current value, invested amount, and "
-                       "absolute + percentage profit/loss, plus portfolio-level totals. Use this "
-                       "for questions like total value, total P&L, or unrealized gains. All math "
-                       "is done in Python.",
+        "description": "Value the user's whole portfolio. For each holding it routes to the right "
+                       "provider by its 'source' (yfinance for stocks/ETFs, yfinance for crypto "
+                       "pairs, mftool for mutual funds; 'manual'/blank are skipped). Because the "
+                       "CSV records money invested (not units), current value is ESTIMATED: units "
+                       "≈ invested ÷ average price over the accumulation window, valued at today's "
+                       "price. Returns per-holding invested/estimated-value/P&L and portfolio "
+                       "totals. Holdings with no live price appear as 'price unavailable' and are "
+                       "excluded from totals — never dropped, never crashing the snapshot. All "
+                       "math is in Python.",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -175,45 +190,84 @@ def fetch_compare(ticker_a: str, ticker_b: str, period: str) -> str:
     })
 
 
+def _to_number(value) -> float:
+    """Parse a CSV cell into a number. Blank, '-', or NaN mean 'no amount' -> 0.0."""
+    if value is None:
+        return 0.0
+    s = str(value).strip().replace(",", "")
+    if s in ("", "-", "nan", "NaN", "None"):
+        return 0.0
+    return float(s)
+
+
+def parse_month_label(label: str) -> tuple[int, int]:
+    """Parse a monthly-column label like "Mar'25" or "April'25" into (year, month).
+
+    Month names are inconsistent (3-letter and full) so we key on the first 3 letters."""
+    name, _, yy = label.strip().partition("'")
+    key = name.strip()[:3].lower()
+    if key not in _MONTHS or not yy.strip().isdigit():
+        raise ValueError(f"unrecognised month label {label!r}")
+    return 2000 + int(yy.strip()), _MONTHS[key]
+
+
 def read_portfolio(path: str = DEFAULT_PORTFOLIO) -> tuple[list[dict], list[str]]:
     """Parse the portfolio CSV into holdings. Returns (holdings, skipped_row_notes).
 
-    Pure of any network I/O so it can be unit-tested. Raises ValueError (never crashes)
-    on a missing file, missing columns, or a file with no usable rows."""
+    No network I/O, so it is unit-testable. Preserves each holding's source/symbol/category
+    and its per-month SIP inflows. Raises ValueError (never crashes) on a missing file,
+    missing required columns, or a file with no usable rows."""
     if not os.path.exists(path):
         raise ValueError(
-            f"Portfolio file '{path}' not found. Create it with columns: "
-            f"{', '.join(PORTFOLIO_COLUMNS)}."
+            f"Portfolio file '{path}' not found. Expected columns include: "
+            f"{', '.join(REQUIRED_COLUMNS)}, plus monthly inflow columns like \"Mar'25\"."
         )
     try:
         df = pd.read_csv(path)
     except Exception as e:
         raise ValueError(f"Could not read '{path}' as CSV: {e}")
-    df.columns = [str(c).strip().lstrip("﻿") for c in df.columns]
-    missing = [c for c in PORTFOLIO_COLUMNS if c not in df.columns]
+    # Header may carry a BOM, embedded newlines, or doubled spaces — normalise whitespace.
+    df.columns = [" ".join(str(c).replace("﻿", "").split()) for c in df.columns]
+    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(
-            f"Portfolio file is missing required column(s): {', '.join(missing)}. "
-            f"Expected: {', '.join(PORTFOLIO_COLUMNS)}."
+            f"Portfolio file is missing required column(s): {', '.join(missing)}."
         )
+    month_cols = [c for c in df.columns if "'" in c]  # monthly SIP-inflow columns
     holdings, skipped = [], []
     for i, row in df.iterrows():
         line = int(i) + 2  # +1 for header, +1 for 1-based line numbers
         try:
-            ticker = str(row["ticker"]).strip()
-            if not ticker or ticker.lower() == "nan":
-                raise ValueError("empty ticker")
-            qty = float(row["quantity"])
-            buy_price = float(row["buy_price"])
-            if qty <= 0 or buy_price <= 0:
-                raise ValueError("quantity and buy_price must be positive numbers")
+            name = str(row["Where"]).strip()
+            # Rows with no name are structural: blank spacers or the sheet's own summary
+            # footer (e.g. "Overall Investments", "Hero Motocop"). Skip them silently —
+            # they are not holdings and shouldn't clutter output or the skipped list.
+            if not name or name.lower() == "nan":
+                continue
+            source = str(row["source"]).strip().lower()
+            if source in ("nan", ""):
+                source = ""  # blank source: no live-price provider
+            symbol = row["symbol"]
+            symbol = None if pd.isna(symbol) or str(symbol).strip().lower() in ("", "nan") \
+                else str(symbol).strip()
+            inflows = []
+            for c in month_cols:
+                amt = _to_number(row[c])
+                if amt > 0:
+                    y, m = parse_month_label(c)
+                    inflows.append((y, m, amt))
+            inflows.sort()
             holdings.append({
-                "ticker": ticker,
-                "quantity": qty,
-                "buy_price": round(buy_price, 2),
-                "buy_date": str(row["buy_date"]).strip(),
+                "name": name,
+                "symbol": symbol,
+                "source": source,
+                "type": str(row.get("Type", "")).strip(),
+                "market": str(row.get("Market", "")).strip(),
+                "risk": str(row.get("Risk", "")).strip(),
+                "total_invested": _to_number(row["Total Invested"]),
+                "inflows": inflows,
             })
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError, KeyError) as e:
             skipped.append(f"line {line}: {e}")
     if not holdings:
         detail = "; ".join(skipped) if skipped else "file has no data rows"
@@ -221,68 +275,140 @@ def read_portfolio(path: str = DEFAULT_PORTFOLIO) -> tuple[list[dict], list[str]
     return holdings, skipped
 
 
-def compute_snapshot(holdings: list[dict], prices: dict[str, float]) -> dict:
-    """Pure P&L math: given holdings and a {ticker: current_price} map, compute per-holding
-    and portfolio-level value and profit/loss. No network I/O — unit-testable. Totals
-    include only holdings that have a current price."""
-    rows, total_invested, total_current = [], 0.0, 0.0
-    for h in holdings:
-        price = prices.get(h["ticker"])
-        if price is None:
-            rows.append({"ticker": h["ticker"], "error": "no current price available"})
-            continue
-        invested = h["quantity"] * h["buy_price"]
-        current = h["quantity"] * price
-        pnl = current - invested
-        rows.append({
-            "ticker": h["ticker"],
-            "quantity": h["quantity"],
-            "buy_price": round(h["buy_price"], 2),
-            "current_price": round(price, 2),
-            "invested": round(invested, 2),
-            "current_value": round(current, 2),
-            "pnl_abs": round(pnl, 2),
-            "pnl_pct": round(pnl / invested * 100, 2),
-        })
-        total_invested += invested
-        total_current += current
-    total_pnl = total_current - total_invested
+def value_from_avg_cost(total_invested: float, avg_price: float,
+                        current_price: float) -> dict:
+    """Pure valuation math for the avg-cost approximation. Units are ESTIMATED as
+    invested / average price over the accumulation window, then valued at today's price.
+    No network I/O — unit-testable."""
+    units = total_invested / avg_price
+    current_value = units * current_price
+    pnl = current_value - total_invested
+    return {
+        "units_est": round(units, 4),
+        "avg_price_est": round(avg_price, 4),
+        "current_price": round(current_price, 4),
+        "invested": round(total_invested, 2),
+        "current_value_est": round(current_value, 2),
+        "pnl_abs_est": round(pnl, 2),
+        "pnl_pct_est": round(pnl / total_invested * 100, 2) if total_invested else 0.0,
+    }
+
+
+def aggregate_snapshot(rows: list[dict]) -> dict:
+    """Pure aggregation over per-holding results. Totals include only 'priced' holdings;
+    'unavailable' holdings are reported and their invested capital summed separately.
+    No network I/O — unit-testable."""
+    priced = [r for r in rows if r.get("status") == "priced"]
+    total_invested_priced = sum(r["invested"] for r in priced)
+    total_current = sum(r["current_value_est"] for r in priced)
+    total_invested_all = sum(r.get("invested", 0.0) for r in rows)
+    total_pnl = total_current - total_invested_priced
     return {
         "holdings": rows,
-        "total_invested": round(total_invested, 2),
-        "total_current_value": round(total_current, 2),
-        "total_pnl_abs": round(total_pnl, 2),
-        "total_pnl_pct": round(total_pnl / total_invested * 100, 2) if total_invested else 0.0,
-        "priced_holdings": sum(1 for r in rows if "error" not in r),
-        "total_holdings": len(rows),
+        "priced_count": len(priced),
+        "total_count": len(rows),
+        "total_invested_priced": round(total_invested_priced, 2),
+        "total_current_value_est": round(total_current, 2),
+        "total_pnl_abs_est": round(total_pnl, 2),
+        "total_pnl_pct_est": round(total_pnl / total_invested_priced * 100, 2)
+                             if total_invested_priced else 0.0,
+        "unpriced_invested": round(total_invested_all - total_invested_priced, 2),
+        "note": "Current values are ESTIMATES: units approximated as invested / average "
+                "price over the accumulation window, valued at today's price.",
     }
 
 
 def load_portfolio(path: str = DEFAULT_PORTFOLIO) -> str:
     holdings, skipped = read_portfolio(path)
-    out = {"holdings": holdings, "count": len(holdings)}
+    listed = [{
+        "name": h["name"],
+        "symbol": h["symbol"],
+        "source": h["source"] or "(blank)",
+        "type": h["type"],
+        "market": h["market"],
+        "total_invested": round(h["total_invested"], 2),
+        "inflow_months": len(h["inflows"]),
+    } for h in holdings]
+    out = {"holdings": listed, "count": len(listed)}
     if skipped:
         out["skipped_rows"] = skipped
     return json.dumps(out)
 
 
+def _next_month_start(year: int, month: int) -> date:
+    return date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+
+
+def _price_series(source: str, symbol: str, start: date, end: date) -> "pd.Series | None":
+    """Fetch a date-indexed closing-price/NAV series for [start, end], or None if no data.
+    yfinance for stocks/ETFs and crypto pairs; mftool historical NAV for mutual funds."""
+    if source in ("yfinance", "crypto"):
+        hist = yf.Ticker(symbol).history(start=start.isoformat(),
+                                         end=(end + timedelta(days=1)).isoformat())
+        return None if hist.empty else hist["Close"]
+    if source == "mftool":
+        raw = _MF.get_scheme_historical_nav(str(symbol))
+        if not raw or not raw.get("data"):
+            return None
+        dates, navs = [], []
+        for d in raw["data"]:
+            try:
+                dates.append(pd.Timestamp(datetime.strptime(d["date"], "%d-%m-%Y")))
+                navs.append(float(d["nav"]))
+            except (ValueError, KeyError, TypeError):
+                continue
+        if not dates:
+            return None
+        s = pd.Series(navs, index=dates).sort_index().loc[
+            pd.Timestamp(start):pd.Timestamp(end)]
+        return s if len(s) else None
+    return None
+
+
+def price_holding(h: dict) -> dict:
+    """Value one holding via the avg-cost approximation, routing by its source. Catches its
+    own errors and returns a 'price unavailable' row rather than raising — one bad holding
+    must never crash the whole snapshot."""
+    base = {
+        "name": h["name"], "symbol": h["symbol"], "source": h["source"] or "(blank)",
+        "type": h["type"], "invested": round(h["total_invested"], 2),
+    }
+    if h["source"] in ("", "manual") or not h["symbol"]:
+        return {**base, "status": "unavailable",
+                "reason": "no live-price source (manual basket or blank source)"}
+    if not h["inflows"]:
+        return {**base, "status": "unavailable",
+                "reason": "no recorded SIP inflows to estimate units from"}
+    try:
+        first_y, first_m, _ = h["inflows"][0]
+        last_y, last_m, _ = h["inflows"][-1]
+        start = date(first_y, first_m, 1)
+        today = date.today()
+        series = _price_series(h["source"], h["symbol"], start, today)
+        if series is None or len(series) == 0:
+            return {**base, "status": "unavailable",
+                    "reason": "no price data for this period (possibly newly listed)"}
+        current_price = float(series.iloc[-1])
+        # Average over the accumulation window only (first inflow -> end of last inflow month).
+        acc_upper = min(_next_month_start(last_y, last_m), today + timedelta(days=1))
+        idx_dates = [ts.date() for ts in series.index]
+        acc = [v for d, v in zip(idx_dates, series.values) if d < acc_upper]
+        avg_price = float(sum(acc) / len(acc)) if acc else float(series.mean())
+        if avg_price <= 0:
+            return {**base, "status": "unavailable", "reason": "non-positive average price"}
+        vals = value_from_avg_cost(h["total_invested"], avg_price, current_price)
+        return {**base, "status": "priced", "price_as_of": str(series.index[-1].date()),
+                **vals}
+    except Exception as e:  # any provider hiccup -> unavailable, never crash the snapshot
+        return {**base, "status": "unavailable", "reason": f"price fetch failed: {e}"}
+
+
 def fetch_snapshot(path: str = DEFAULT_PORTFOLIO) -> str:
     holdings, skipped = read_portfolio(path)
-    prices, price_errors = {}, {}
-    for h in holdings:
-        try:
-            hist = yf.Ticker(h["ticker"]).history(period="5d")
-            if hist.empty:
-                price_errors[h["ticker"]] = "no price data — check the ticker symbol"
-            else:
-                prices[h["ticker"]] = float(hist["Close"].iloc[-1])
-        except Exception as e:  # one bad ticker shouldn't sink the whole snapshot
-            price_errors[h["ticker"]] = str(e)
-    snap = compute_snapshot(holdings, prices)
+    rows = [price_holding(h) for h in holdings]
+    snap = aggregate_snapshot(rows)
     if skipped:
         snap["skipped_rows"] = skipped
-    if price_errors:
-        snap["price_errors"] = price_errors
     return json.dumps(snap)
 
 
