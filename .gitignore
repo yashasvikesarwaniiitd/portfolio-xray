@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 portfolio.csv
 xray.db
+
+.digest_state.json

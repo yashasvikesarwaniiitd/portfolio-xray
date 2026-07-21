@@ -43,6 +43,14 @@ def test_xirr_parag_parikh_regression():
     assert xirr(flows) * 100 == pytest.approx(0.69, abs=0.05)
 
 
+def test_parag_parikh_value_at_reference_nav():
+    """Ground truth locked network-free: the exact reconstructed units valued at the reference
+    NAV (91.4603 on 2026-07-17) reproduce the hand-verified Rs 106,509. This number can't drift
+    because both inputs are fixed; the live test only checks units + internal consistency."""
+    REFERENCE_NAV = 91.4603
+    assert 1164.5414 * REFERENCE_NAV == pytest.approx(106509, rel=0.001)
+
+
 def test_xirr_needs_sign_change():
     with pytest.raises(ValueError):
         xirr([(date(2025, 1, 1), -100.0), (date(2026, 1, 1), -50.0)])

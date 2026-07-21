@@ -16,10 +16,15 @@ recommendation/prediction, classify it as `advice`.
 
 Categories:
 - analytics: wants numbers about THIS user's portfolio or a specific instrument — value, P&L,
-  XIRR/returns, beta, Sharpe, concentration, NAV, price, price history, units held.
-  e.g. "What's my portfolio XIRR?" / "How concentrated am I?" / "Beta of RELIANCE.NS?"
-- news: asks about recent events/updates/news for a holding or the market.
+  XIRR/returns, beta, Sharpe, concentration, NAV, a stock/crypto/index PRICE or LEVEL, price
+  history, units held. Market indices (NIFTY 50, Sensex) and crypto (Bitcoin, BTC) are in
+  scope — they are market data this assistant reports, never off-topic.
+  e.g. "What's my portfolio XIRR?" / "How concentrated am I?" / "Beta of RELIANCE.NS?" /
+  "What's the current NIFTY 50 level?" / "Bitcoin price today?"
+- news: asks about recent events/updates/news for a holding, an index, or a market — including
+  crypto (Bitcoin) and indices (Nifty).
   e.g. "Any news on Reliance?" / "What happened to Infosys this week?" / "Latest on smallcaps?"
+  / "Any updates on Bitcoin?" / "News around the Nifty this week?"
 - education: a conceptual/definitional question answerable without the user's data or tools.
   e.g. "What is beta?" / "What does XIRR mean?" / "How is the Sharpe ratio calculated?"
 - advice: seeks a buy/sell/hold recommendation, a personal course of action, OR a prediction
@@ -27,8 +32,8 @@ Categories:
   "which holding would you drop?") and predictions ("will X go up?", "is now a good time?").
   e.g. "Should I sell Kotak Small Cap?" / "What would you do with my portfolio?" /
   "Will smallcaps recover?"
-- offtopic: unrelated to investing or this portfolio.
-  e.g. "What's the weather?" / "Write a poem." / "Who won the match?"
+- offtopic: unrelated to investing, markets, or this portfolio.
+  e.g. "What's the weather?" / "Write a poem." / "Who won the match?" / "Capital of France?"
 
 Always respond by calling the `classify` tool."""
 
@@ -47,15 +52,18 @@ CLASSIFY_TOOL = {
 }
 
 
-def classify(client, query: str, model: str = ROUTER_MODEL) -> dict:
+def classify(client, query: str, model: str = ROUTER_MODEL, usage=None) -> dict:
     """Return {"category", "reason"}. On any parse/API oddity, default to 'advice' — the
-    safe failure mode is to refuse rather than risk routing a hidden advice ask to the tools."""
+    safe failure mode is to refuse rather than risk routing a hidden advice ask to the tools.
+    If a logger.Usage is passed, the classifier call's token usage is recorded on it."""
     try:
         resp = client.messages.create(
             model=model, max_tokens=200, system=ROUTER_SYSTEM,
             tools=[CLASSIFY_TOOL], tool_choice={"type": "tool", "name": "classify"},
             messages=[{"role": "user", "content": query}],
         )
+        if usage is not None:
+            usage.add(model, resp)
         for block in resp.content:
             if block.type == "tool_use" and block.name == "classify":
                 cat = block.input.get("category")

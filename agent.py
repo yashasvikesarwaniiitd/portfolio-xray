@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import time
 from datetime import date, datetime, timedelta
 
 import anthropic
@@ -10,7 +11,9 @@ import yfinance as yf
 from dotenv import load_dotenv
 from mftool import Mftool
 
+import logger
 import metrics
+import news
 import refusals
 import router
 
@@ -51,8 +54,15 @@ SYSTEM = (
     "- beta: a stock/ETF's sensitivity to the NIFTY 50 (not applicable to mutual funds).\n"
     "- sharpe: portfolio risk-adjusted return.\n"
     "- concentration: how diversified the portfolio is (weights, HHI, >10% flags).\n"
+    "- get_news: recent cited headlines for a holding (search by company name, not ticker).\n"
+    "- weekly_digest: a 'what changed this week?' sweep — week moves, cited news, drift.\n"
     "- load_portfolio, get_price, get_index, get_return, compare_returns, get_nav, "
     "price_history for holdings listing and market data.\n\n"
+    "NEWS CITATION RULE (absolute): every factual claim about a holding's news MUST carry an "
+    "inline citation to the specific article URL it came from, and end with a Sources list. "
+    "If a claim has no supporting article, do not make it. Never state news you can't cite. "
+    "In the weekly digest, attribute each 'why it moved' to a cited article; report what moved "
+    "and why, never what the user should do.\n\n"
     "Portfolio values now use EXACT unit reconstruction (units per SIP = amount ÷ price on that "
     "SIP's date, summed), valued at the latest available price — these are computed figures, not "
     "estimates. Values are 'as of' each holding's latest price date. Holdings marked "
@@ -229,6 +239,28 @@ TOOLS = [
                        "(sum of squared weights) and effective number of holdings, weight by "
                        "Market/Type/Risk, and any single holding over 10%. Use for 'how "
                        "concentrated / diversified is my portfolio?'.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_news",
+        "description": "Fetch recent news headlines for a company/fund from Google News, each "
+                       "with its source and article URL. Search by the human name (e.g. "
+                       "'Reliance Industries'), not the ticker. Every claim you make from these "
+                       "MUST cite the specific article URL it came from.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string",
+                                     "description": "company/fund name to search news for"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "weekly_digest",
+        "description": "Sweep the whole portfolio into a 'what changed this week?' briefing: "
+                       "each holding's week price move, cited recent news for the largest "
+                       "holdings, and concentration drift vs the prior digest. Use when the "
+                       "user asks what changed / for a weekly update. Cite every news claim to "
+                       "its URL; report what moved, never what to do.",
         "input_schema": {"type": "object", "properties": {}},
     },
 ]
@@ -658,6 +690,201 @@ def fetch_concentration(path: str = DEFAULT_PORTFOLIO) -> str:
     return json.dumps(stats)
 
 
+# --- news: fetch + evaluator-optimizer refetch + cited synthesis ---------------------------
+
+def fetch_news_tool(query: str) -> str:
+    """Tool wrapper: return recent cited headlines for a query as JSON (headline/source/
+    date/url). Never raises — a failed fetch comes back as an empty list with an error."""
+    return json.dumps(news.fetch_news(query))
+
+
+def _news_query_from_text(user_text: str, path: str = DEFAULT_PORTFOLIO) -> str:
+    """Prefer a portfolio holding's human name when it appears in the query (news search
+    works better on 'Reliance Industries' than a ticker or a full sentence)."""
+    try:
+        holdings, _ = read_portfolio(path)
+    except Exception:
+        holdings = []
+    low = user_text.lower()
+    for h in holdings:
+        name = h["name"]
+        if name and len(name) > 2 and name.lower() in low:
+            return news.news_query(name)
+    return user_text.strip()
+
+
+_NEWS_SUFFICIENT_TOOL = {
+    "name": "assess",
+    "description": "Judge whether the retrieved headlines are sufficient and recent enough.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"sufficient": {"type": "boolean"},
+                       "reason": {"type": "string"}},
+        "required": ["sufficient", "reason"],
+    },
+}
+
+
+def _news_sufficient(client, user_text: str, result: dict, usage=None) -> bool:
+    """Evaluator step of the evaluator-optimizer pattern: one Haiku call asking whether the
+    retrieved context can answer the question. No articles -> insufficient without a call."""
+    if result.get("error") or result["count"] == 0:
+        return False
+    heads = "\n".join(f"- {a['headline']} ({a['source']}, {a['published']})"
+                      for a in result["articles"])
+    resp = client.messages.create(
+        model=MODEL, max_tokens=150,
+        system="You judge whether retrieved news headlines are sufficient and recent enough "
+               "to answer the user's question. Answer via the assess tool.",
+        tools=[_NEWS_SUFFICIENT_TOOL], tool_choice={"type": "tool", "name": "assess"},
+        messages=[{"role": "user",
+                   "content": f"Question: {user_text}\n\nRetrieved headlines:\n{heads}"}],
+    )
+    if usage is not None:
+        usage.add(MODEL, resp)
+    for b in resp.content:
+        if b.type == "tool_use" and b.name == "assess":
+            return bool(b.input.get("sufficient"))
+    return True
+
+
+_NEWS_SYNTH_SYSTEM = (
+    "You summarise recent news about an investment holding for an analytics assistant. "
+    "HARD RULE: every factual claim MUST carry an inline citation [n] pointing to the "
+    "numbered article it came from. If a fact has no supporting article, DO NOT state it. "
+    "If there are no articles, say news is unavailable and stop. Never give buy/sell/hold "
+    "advice or predictions — report what the articles say, not what the user should do. End "
+    "with a 'Sources:' list mapping each [n] to its URL. Keep it concise and plain-English."
+)
+
+
+def _synthesize_news(client, user_text: str, result: dict, usage=None) -> str:
+    if result["count"] == 0:
+        reason = result.get("error") or "no recent articles found"
+        return (f"I couldn't find citable recent news for that ({reason}). I can't report "
+                "news without a source to back it up.")
+    numbered = "\n".join(
+        f"[{i + 1}] {a['headline']} — {a['source']}, {a['published']} — {a['url']}"
+        for i, a in enumerate(result["articles"]))
+    resp = client.messages.create(
+        model=MODEL, max_tokens=900, system=_NEWS_SYNTH_SYSTEM,
+        messages=[{"role": "user",
+                   "content": f"Question: {user_text}\n\nArticles:\n{numbered}"}],
+    )
+    if usage is not None:
+        usage.add(MODEL, resp)
+    return next((b.text for b in resp.content if b.type == "text"), "")
+
+
+def answer_news(client, user_text: str, usage=None) -> str:
+    """Evaluator-optimizer: fetch news, judge sufficiency, refetch ONCE with a broadened query
+    if insufficient, then synthesise a cited answer. One refetch max bounds cost."""
+    query = _news_query_from_text(user_text)
+    result = news.fetch_news(query)
+    if not _news_sufficient(client, user_text, result, usage):
+        # Optimizer step: broaden the query and try once more (never more — bounded cost).
+        retry = news.fetch_news(f"{query} latest news")
+        if retry["count"] > result["count"]:
+            result = retry
+    return _synthesize_news(client, user_text, result, usage)
+
+
+# --- weekly digest: one-command portfolio sweep --------------------------------------------
+
+_DIGEST_STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".digest_state.json")
+
+
+def _digest_holding(h: dict) -> dict:
+    """Value one holding and compute its ~1-week price move from a single price fetch."""
+    if h["source"] in ("", "manual") or not h["symbol"] or not h["inflows"]:
+        return {"name": h["name"], "status": "unavailable"}
+    try:
+        start = date(h["inflows"][0][0], h["inflows"][0][1], 1) - timedelta(days=15)
+        today = date.today()
+        pmap = _price_map(h["source"], h["symbol"], start, today)
+        if not pmap:
+            return {"name": h["name"], "status": "unavailable"}
+        price_date = max(pmap)
+        latest = pmap[price_date]
+        priced = [{"date": date(y, m, 1), "amount": amt,
+                   "price": metrics.nav_on_or_before(pmap, date(y, m, 1))}
+                  for (y, m, amt) in h["inflows"]]
+        rec = metrics.reconstruct_units(priced)
+        if rec["total_units"] == 0:
+            return {"name": h["name"], "status": "unavailable"}
+        week_ago = metrics.nav_on_or_before(pmap, price_date - timedelta(days=7), max_back=10)
+        week_pct = round((latest / week_ago - 1) * 100, 2) if week_ago else None
+        return {"name": h["name"], "symbol": h["symbol"], "market": h["market"],
+                "status": "priced", "value": round(rec["total_units"] * latest, 2),
+                "week_change_pct": week_pct, "price_date": str(price_date)}
+    except Exception:
+        return {"name": h["name"], "status": "unavailable"}
+
+
+def build_digest(path: str = DEFAULT_PORTFOLIO, news_top_n: int = 6) -> dict:
+    """Sweep the portfolio into a briefing: per-holding week move (Python), cited recent news
+    for the largest holdings, and concentration drift vs the prior digest. Analytics only —
+    reports what moved and (per cited news) why, never what to do."""
+    holdings, _ = read_portfolio(path)
+    rows = [_digest_holding(h) for h in holdings]
+    priced = [r for r in rows if r["status"] == "priced"]
+    total_value = sum(r["value"] for r in priced)
+    for r in priced:
+        r["weight_pct"] = round(r["value"] / total_value * 100, 2) if total_value else 0.0
+    # Value-weighted portfolio week move (priced holdings with a week figure).
+    wk = [(r["value"], r["week_change_pct"]) for r in priced if r["week_change_pct"] is not None]
+    port_week = round(sum(v * p for v, p in wk) / sum(v for v, _ in wk), 2) if wk else None
+
+    # Cited news for the largest holdings only (bounds RSS calls; no per-holding LLM cost).
+    top = sorted(priced, key=lambda r: r["value"], reverse=True)[:news_top_n]
+    for r in top:
+        nr = news.fetch_news(news.news_query(r["name"]), limit=3)
+        r["news"] = [{"headline": a["headline"], "source": a["source"], "url": a["url"]}
+                     for a in nr["articles"][:2]]
+
+    # Concentration drift vs the prior digest's stored weights.
+    drift = []
+    try:
+        if os.path.exists(_DIGEST_STATE):
+            with open(_DIGEST_STATE, encoding="utf-8") as f:
+                prior = json.load(f).get("weights", {})
+            for r in priced:
+                if r["name"] in prior:
+                    d = round(r["weight_pct"] - prior[r["name"]], 2)
+                    if abs(d) >= 0.5:
+                        drift.append({"name": r["name"], "delta_pct": d,
+                                      "from": prior[r["name"]], "to": r["weight_pct"]})
+            drift.sort(key=lambda x: abs(x["delta_pct"]), reverse=True)
+    except Exception:
+        drift = []
+    try:  # persist current weights for next time
+        with open(_DIGEST_STATE, "w", encoding="utf-8") as f:
+            json.dump({"weights": {r["name"]: r["weight_pct"] for r in priced}}, f)
+    except Exception:
+        pass
+
+    top_movers = sorted([r for r in priced if r["week_change_pct"] is not None],
+                        key=lambda r: abs(r["week_change_pct"]), reverse=True)[:5]
+    return {
+        "highlights": {
+            "total_current_value": round(total_value, 2),
+            "portfolio_week_change_pct": port_week,
+            "priced_holdings": len(priced), "total_holdings": len(rows),
+            "top_movers": [{"name": r["name"], "week_change_pct": r["week_change_pct"]}
+                           for r in top_movers],
+            "concentration_drift": drift[:5] if drift else "no prior digest to compare",
+        },
+        "holdings": sorted(priced, key=lambda r: r["value"], reverse=True),
+        "note": "Week moves and values are Python-computed. News items are headlines with "
+                "their source URLs — cite them. This is a factual briefing of what moved and "
+                "(per news) why; it is not advice.",
+    }
+
+
+def fetch_digest() -> str:
+    return json.dumps(build_digest())
+
+
 def fetch_nav(fund_code: str) -> str:
     code = str(fund_code).strip()
     quote = _MF.get_scheme_quote(code)  # returns None for an unknown code
@@ -729,22 +956,29 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
             return fetch_sharpe(), False
         if name == "concentration":
             return fetch_concentration(), False
+        if name == "get_news":
+            return fetch_news_tool(args["query"]), False
+        if name == "weekly_digest":
+            return fetch_digest(), False
         return f"Unknown tool: {name}", True
     except Exception as e:
         return f"Error: {e}", True
 
 
 def turn(client: anthropic.Anthropic, messages: list, tools: list | None = None,
-         tools_used: list | None = None) -> str:
+         tools_used: list | None = None, usage=None) -> str:
     """Run the tool-calling loop until the model answers in text. `tools` defaults to the
     full tool set; pass [] for a no-tools turn (education). Tool names actually called are
-    appended to `tools_used` if provided (used by the eval harness for tool-correctness)."""
+    appended to `tools_used` if provided (used by the eval harness for tool-correctness).
+    Token usage from each model call is recorded on `usage` if provided."""
     tools = TOOLS if tools is None else tools
     while True:
         kwargs = {"model": MODEL, "max_tokens": 1024, "system": SYSTEM, "messages": messages}
         if tools:
             kwargs["tools"] = tools
         resp = client.messages.create(**kwargs)
+        if usage is not None:
+            usage.add(MODEL, resp)
         messages.append({"role": "assistant", "content": resp.content})
         if resp.stop_reason != "tool_use":
             return next((b.text for b in resp.content if b.type == "text"), "")
@@ -765,45 +999,50 @@ OFFTOPIC_REDIRECT = (
     "investments. Ask me about your portfolio's value, returns (XIRR), risk (beta, Sharpe, "
     "concentration), a fund's NAV, or a stock's price history."
 )
-NEWS_STUB = (
-    "I can't pull news yet — a citable news tool is planned for a later version. For now I can "
-    "help with analytics: your holdings' value, XIRR, beta, Sharpe, concentration, NAVs, and "
-    "price history."
-)
-
-
 def answer_query(client: anthropic.Anthropic, messages: list, user_text: str,
-                 state: dict | None = None) -> dict:
-    """Route the query, then dispatch. `advice` and `offtopic` short-circuit before any tool
-    runs; `news` returns a stub; `education` answers with no tools; `analytics` runs the tool
-    loop. `state` tracks the consecutive-refusal streak so we harden the refusal on repeats.
+                 state: dict | None = None, log: bool = True) -> dict:
+    """Route the query, then dispatch. `advice`/`offtopic` short-circuit before any tool runs;
+    `news` fetches cited news (evaluator-optimizer refetch + synthesis); `education` answers
+    with no tools; `analytics` runs the tool loop. `state` tracks the consecutive-refusal
+    streak so we harden the refusal on repeats. Per-query cost + latency are logged to SQLite.
     Returns {category, answer, tools_used, refused, subtype?}."""
     state = {} if state is None else state
-    route = router.classify(client, user_text)
+    usage = logger.Usage()
+    started = time.perf_counter()
+    route = router.classify(client, user_text, usage=usage)
     category = route["category"]
     messages.append({"role": "user", "content": user_text})
+
+    def _finish(result: dict) -> dict:
+        if log:
+            logger.log_query(datetime.now().isoformat(timespec="seconds"), result["category"],
+                             result["tools_used"], usage,
+                             round((time.perf_counter() - started) * 1000))
+        return result
 
     if category == "advice":
         state["advice_streak"] = state.get("advice_streak", 0) + 1
         ref = refusals.refuse(user_text, repeat=state["advice_streak"] - 1)
         messages.append({"role": "assistant", "content": ref["message"]})
-        return {"category": category, "answer": ref["message"], "tools_used": [],
-                "refused": True, "subtype": ref["subtype"]}
+        return _finish({"category": category, "answer": ref["message"], "tools_used": [],
+                        "refused": True, "subtype": ref["subtype"]})
 
     state["advice_streak"] = 0  # any non-advice query resets the streak
     if category == "offtopic":
         messages.append({"role": "assistant", "content": OFFTOPIC_REDIRECT})
-        return {"category": category, "answer": OFFTOPIC_REDIRECT, "tools_used": [],
-                "refused": False}
+        return _finish({"category": category, "answer": OFFTOPIC_REDIRECT,
+                        "tools_used": [], "refused": False})
     if category == "news":
-        messages.append({"role": "assistant", "content": NEWS_STUB})
-        return {"category": category, "answer": NEWS_STUB, "tools_used": [], "refused": False}
+        answer = answer_news(client, user_text, usage=usage)
+        messages.append({"role": "assistant", "content": answer})
+        return _finish({"category": category, "answer": answer,
+                        "tools_used": ["get_news"], "refused": False})
 
     tools_used: list = []
     tools = [] if category == "education" else TOOLS  # education answers without tools
-    answer = turn(client, messages, tools=tools, tools_used=tools_used)
-    return {"category": category, "answer": answer, "tools_used": tools_used,
-            "refused": False}
+    answer = turn(client, messages, tools=tools, tools_used=tools_used, usage=usage)
+    return _finish({"category": category, "answer": answer, "tools_used": tools_used,
+                    "refused": False})
 
 
 def main():

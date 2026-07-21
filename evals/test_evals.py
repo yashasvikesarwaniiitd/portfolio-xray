@@ -50,12 +50,13 @@ def test_judge_calibration(client):
 
 @pytest.mark.regression
 def test_metric_accuracy_parag_parikh():
-    """Reused ground-truth lock so metric accuracy is part of the eval gate too."""
+    """Reused ground-truth lock so metric accuracy is part of the eval gate too. Units are the
+    drift-free invariant; live current_value tracks today's NAV (checked for consistency)."""
     from test_agent import PP_HOLDING  # the exact 122639 holding
     r = agent.reconstruct_holding(PP_HOLDING)
     assert r["status"] == "priced"
-    assert r["current_value"] == pytest.approx(106509, rel=0.005)
-    assert r["xirr_pct"] == pytest.approx(0.69, abs=0.1)
+    assert r["units"] == pytest.approx(1164.541, rel=0.001)
+    assert r["current_value"] == pytest.approx(r["units"] * r["current_price"], rel=1e-4)
 
 
 # A few FAST analytics prompts (single-fetch tools) for tool-correctness in the gate; the
@@ -70,7 +71,24 @@ _LIGHT_TOOL_CASES = [
 
 @pytest.mark.parametrize("query,expected_tool", _LIGHT_TOOL_CASES)
 def test_tool_correctness_lightweight(client, query, expected_tool):
-    result = agent.answer_query(client, [], query, {})
+    result = agent.answer_query(client, [], query, {}, log=False)
     assert result["category"] == "analytics"
     assert expected_tool in result["tools_used"], \
         f"expected {expected_tool}, got {result['tools_used']}"
+
+
+import news  # noqa: E402
+
+
+@pytest.mark.parametrize("query", ["What's the latest news on Reliance?",
+                                   "Any recent news on TCS?"])
+def test_news_answer_is_grounded(client, query):
+    """A synthesised news answer must be grounded in the articles it was given (every claim
+    traces to a provided article). This is the citation guarantee made measurable."""
+    articles = news.fetch_news(agent._news_query_from_text(query))["articles"]
+    if not articles:
+        pytest.skip("no articles returned (upstream/rate-limit) — not a groundedness failure")
+    answer = agent._synthesize_news(client, query, {"count": len(articles),
+                                                    "articles": articles})
+    verdict = harness.judge_groundedness(client, answer, articles)
+    assert verdict["groundedness"] >= 4, f"ungrounded news answer: {verdict}"

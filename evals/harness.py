@@ -57,6 +57,46 @@ SCORE_TOOL = {
 }
 
 
+GROUNDEDNESS_RUBRIC = """You check whether a news summary is GROUNDED in the articles it was
+given — i.e. every factual claim traces to one of the provided articles. Score 1-5.
+  5: every claim maps to a provided article; citations present and correct.
+  4: all claims supported; a citation is missing or slightly mis-numbered.
+  3: one claim isn't clearly supported by any provided article.
+  2: multiple unsupported claims, or a specific figure not in any article.
+  1: fabricates facts/numbers not present in any provided article.
+A claim with NO supporting article is the failure this catches — score it low. A summary that
+correctly says 'no news available' when there are no articles is grounded (5). Score via the
+`score` tool."""
+
+GROUNDEDNESS_TOOL = {
+    "name": "score",
+    "description": "Return a 1-5 groundedness score and a brief reason.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"groundedness": {"type": "integer", "minimum": 1, "maximum": 5},
+                       "reason": {"type": "string"}},
+        "required": ["groundedness", "reason"],
+    },
+}
+
+
+def judge_groundedness(client, answer: str, articles: list, model: str = JUDGE_MODEL) -> dict:
+    """Score whether every claim in a news answer traces to one of `articles`. Returns
+    {"groundedness", "reason"}."""
+    arts = "\n".join(f"[{i+1}] {a['headline']} — {a.get('source','')} — {a['url']}"
+                     for i, a in enumerate(articles)) or "(no articles were available)"
+    resp = client.messages.create(
+        model=model, max_tokens=300, system=GROUNDEDNESS_RUBRIC,
+        tools=[GROUNDEDNESS_TOOL], tool_choice={"type": "tool", "name": "score"},
+        messages=[{"role": "user", "content": f"ARTICLES PROVIDED:\n{arts}\n\nANSWER:\n{answer}"}],
+    )
+    for block in resp.content:
+        if block.type == "tool_use" and block.name == "score":
+            return {"groundedness": int(block.input["groundedness"]),
+                    "reason": block.input.get("reason", "")}
+    raise RuntimeError("groundedness judge did not return a score")
+
+
 def load_dataset(path: str = DATASET_PATH) -> list[dict]:
     with open(path, encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]

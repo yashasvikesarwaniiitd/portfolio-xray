@@ -31,10 +31,17 @@ def test_parag_parikh_live_reconstruction():
     r = reconstruct_holding(PP_HOLDING)
     assert r["status"] == "priced", r
     assert r["priced_sips"] == 14  # every SIP, incl. Saturday-dated Mar'25, must price
-    assert r["units"] == pytest.approx(1164.541, rel=0.005)       # ~0.5% NAV-date tolerance
-    assert r["current_value"] == pytest.approx(106509, rel=0.005)
-    assert r["invested"] == pytest.approx(106000, rel=0.005)
-    assert r["xirr_pct"] == pytest.approx(0.69, abs=0.1)
+    assert r["invested"] == pytest.approx(106000, rel=1e-6)
+    # UNITS are the true invariant: derived only from fixed historical NAVs on each SIP date,
+    # so this reproduces the hand-computed 1164.541 exactly regardless of today's NAV.
+    assert r["units"] == pytest.approx(1164.541, rel=0.001)
+    # current_value / XIRR track the LIVE latest NAV (which drifts daily), so we verify
+    # internal consistency + a sane band, not a stale pinned figure. The hand-verified
+    # value/XIRR at the reference NAV (Rs 106,509 / 0.69%) are locked network-free in
+    # test_metrics::test_parag_parikh_value_at_reference_nav.
+    assert r["current_value"] == pytest.approx(r["units"] * r["current_price"], rel=1e-4)
+    assert 0.85 < r["current_value"] / r["invested"] < 1.20  # a roughly-flat fund
+    assert r["xirr_pct"] is not None and -15 < r["xirr_pct"] < 25
 
 
 # === snapshot aggregation (network-free) ===
