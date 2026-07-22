@@ -56,8 +56,15 @@ SYSTEM = (
     "- concentration: how diversified the portfolio is (weights, HHI, >10% flags).\n"
     "- get_news: recent cited headlines for a holding (search by company name, not ticker).\n"
     "- weekly_digest: a 'what changed this week?' sweep — week moves, cited news, drift.\n"
+    "- generate_health_report: the downloadable Excel health report (charts + guarded AI "
+    "insights). Tell the user the returned file path and its cost.\n"
     "- load_portfolio, get_price, get_index, get_return, compare_returns, get_nav, "
-    "price_history for holdings listing and market data.\n\n"
+    "search_fund, price_history for holdings listing and market data.\n\n"
+    "Never ask the user for an AMFI scheme code. Resolve a fund name yourself: search_fund "
+    "maps names to codes, and for funds the user already owns, load_portfolio's symbol "
+    "column IS the AMFI code. Only ask if search returns several plausible funds and the "
+    "user's wording can't disambiguate plan/option (Direct vs Regular, Growth vs IDCW) — "
+    "default to Direct Growth when they don't say.\n\n"
     "NEWS CITATION RULE (absolute): every factual claim about a holding's news MUST carry an "
     "inline citation to the specific article URL it came from, and end with a Sources list. "
     "If a claim has no supporting article, do not make it. Never state news you can't cite. "
@@ -255,6 +262,29 @@ TOOLS = [
         },
     },
     {
+        "name": "search_fund",
+        "description": "Resolve an Indian mutual fund NAME to its AMFI scheme code(s) — e.g. "
+                       "'Parag Parikh Flexi Cap' -> 122639 (Direct Growth). ALWAYS use this "
+                       "(or the portfolio's own symbol, which for MF holdings IS the AMFI "
+                       "code) instead of asking the user for a code. Then pass the code to "
+                       "get_nav.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string",
+                                     "description": "fund name or part of it"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "generate_health_report",
+        "description": "Generate the downloadable Portfolio Health Report (Excel): tiered "
+                       "sections (allocation, diversification, concentration, sector, "
+                       "overlap, risk, cost, questions) with charts and guarded AI insight "
+                       "blocks. Use when the user asks for their health report / full "
+                       "check-up / downloadable report. Returns the file path and cost.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "weekly_digest",
         "description": "Sweep the whole portfolio into a 'what changed this week?' briefing: "
                        "each holding's week price move, cited recent news for the largest "
@@ -267,18 +297,20 @@ TOOLS = [
 
 
 def fetch_close(symbol: str) -> str:
-    hist = yf.Ticker(symbol).history(period="5d")
+    # .dropna(): yfinance appends today's row with a NaN close before the day's data
+    # publishes (e.g. market closed) — the latest REAL close is what we want.
+    hist = yf.Ticker(symbol).history(period="5d")["Close"].dropna()
     if hist.empty:
         raise ValueError(f"No data for '{symbol}' — check the ticker symbol.")
     return json.dumps({
         "symbol": symbol,
-        "close": round(float(hist["Close"].iloc[-1]), 2),
+        "close": round(float(hist.iloc[-1]), 2),
         "as_of": str(hist.index[-1].date()),
     })
 
 
 def compute_return(symbol: str, period: str) -> dict:
-    hist = yf.Ticker(symbol).history(period=period)
+    hist = yf.Ticker(symbol).history(period=period)["Close"].dropna().to_frame("Close")
     if hist.empty:
         raise ValueError(f"No data for '{symbol}' — check the ticker symbol.")
     start, end = float(hist["Close"].iloc[0]), float(hist["Close"].iloc[-1])
@@ -885,6 +917,31 @@ def fetch_digest() -> str:
     return json.dumps(build_digest())
 
 
+_SCHEME_CODES: dict | None = None  # AMFI code->name master list, fetched once per session
+
+
+def search_fund(query: str, limit: int = 10) -> str:
+    """Resolve a mutual-fund NAME to AMFI scheme codes by all-words match over the AMFI
+    master list (~14k schemes, via mftool — free). Direct-Growth variants sort first since
+    that's the usual ask."""
+    global _SCHEME_CODES
+    if _SCHEME_CODES is None:
+        _SCHEME_CODES = _MF.get_scheme_codes() or {}
+    words = [w for w in str(query).lower().split() if w not in ("fund", "mutual", "the")]
+    if not words:
+        raise ValueError("Give me part of the fund's name to search for.")
+    hits = [{"fund_code": str(c), "scheme_name": n} for c, n in _SCHEME_CODES.items()
+            if all(w in n.lower() for w in words)]
+    if not hits:
+        raise ValueError(f"No AMFI scheme matches '{query}'. Try fewer/simpler words.")
+    hits.sort(key=lambda h: ("direct" not in h["scheme_name"].lower(),
+                             "growth" not in h["scheme_name"].lower(),
+                             h["scheme_name"]))
+    return json.dumps({"query": query, "matches": hits[:limit], "total_matches": len(hits),
+                       "note": "Pass the chosen fund_code to get_nav. Direct-Growth "
+                               "variants are listed first."})
+
+
 def fetch_nav(fund_code: str) -> str:
     code = str(fund_code).strip()
     quote = _MF.get_scheme_quote(code)  # returns None for an unknown code
@@ -904,7 +961,9 @@ def fetch_price_history(ticker: str, period: str, max_points: int = 30) -> str:
     hist = yf.Ticker(ticker).history(period=period)
     if hist.empty:
         raise ValueError(f"No data for '{ticker}' — check the ticker symbol.")
-    closes = hist["Close"]
+    closes = hist["Close"].dropna()  # drop yfinance's NaN today-row (data not yet published)
+    if closes.empty:
+        raise ValueError(f"No data for '{ticker}' — check the ticker symbol.")
     step = max(1, len(closes) // max_points)  # downsample long series to stay compact
     series = [{"date": str(idx.date()), "close": round(float(v), 2)}
               for idx, v in list(closes.items())[::step]]
@@ -944,6 +1003,8 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
             return fetch_snapshot(), False
         if name == "get_nav":
             return fetch_nav(args["fund_code"]), False
+        if name == "search_fund":
+            return search_fund(args["query"]), False
         if name == "price_history":
             return fetch_price_history(args["ticker"], args["period"]), False
         if name == "portfolio_xirr":
@@ -960,6 +1021,9 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
             return fetch_news_tool(args["query"]), False
         if name == "weekly_digest":
             return fetch_digest(), False
+        if name == "generate_health_report":
+            from report import generate_report  # deferred: heavy deps load only when used
+            return json.dumps(generate_report()), False
         return f"Unknown tool: {name}", True
     except Exception as e:
         return f"Error: {e}", True
@@ -1061,7 +1125,9 @@ def main():
         if not user:
             continue
         result = answer_query(client, messages, user, state)
-        print(result["answer"])
+        # Console-display only: classic conhost fonts lack the ₹ glyph (renders as a box).
+        # Data, logs, and Excel reports keep the real symbol.
+        print(result["answer"].replace("₹", "Rs "))
 
 
 if __name__ == "__main__":

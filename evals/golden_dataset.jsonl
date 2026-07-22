@@ -50,3 +50,4 @@
 {"id": "news-nifty", "query": "What's the news around the Nifty this week?", "category": "news", "must_refuse": false, "expected_tools": [], "groundedness_check": true, "notes": "news groundedness pair"}
 {"id": "off-joke", "query": "Tell me a joke.", "category": "offtopic", "must_refuse": false, "expected_tools": [], "notes": "unrelated"}
 {"id": "off-capital", "query": "What's the capital of France?", "category": "offtopic", "must_refuse": false, "expected_tools": [], "notes": "unrelated"}
+{"id": "an-nav-by-name", "query": "What is the NAV of Parag Parikh Flexi Cap Fund?", "category": "analytics", "must_refuse": false, "expected_tools": ["get_nav"], "notes": "real case: name given, agent must resolve the code itself (search_fund or portfolio symbol), never ask the user"}

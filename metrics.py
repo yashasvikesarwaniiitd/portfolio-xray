@@ -136,6 +136,91 @@ def sharpe_ratio(ann_return: float, ann_volatility: float, risk_free_rate: float
     return (ann_return - risk_free_rate) / ann_volatility
 
 
+# --- health-report metrics (all pure; report/data.py feeds them real inputs) ---
+
+def hhi_of_weights(weights: list[float]) -> float:
+    """HHI over fractional weights of ANY grouping (asset class, geography, holdings...).
+    Weights are normalised first so callers can pass raw values. 1.0 = everything in one
+    bucket; 1/n = perfectly even across n buckets."""
+    total = sum(weights)
+    if total <= 0:
+        raise ValueError("hhi_of_weights: total weight must be positive")
+    return sum((w / total) ** 2 for w in weights)
+
+
+def effective_holdings(hhi: float) -> float:
+    """1/HHI — how many equal-weight independent positions the book behaves like."""
+    if hhi <= 0:
+        raise ValueError("effective_holdings: HHI must be positive")
+    return 1.0 / hhi
+
+
+def spread(weights: list[float]) -> float:
+    """Spread term for the diversification score: 1 − HHI over a grouping's weights.
+    0 = all in one bucket, →1 = evenly spread over many buckets."""
+    return 1.0 - hhi_of_weights(weights)
+
+
+def fund_overlap(holdings_a: list[str], holdings_b: list[str]) -> float:
+    """Overlap between two funds' disclosed top-10 holdings: fraction (0–1) of the smaller
+    list's names also present in the other, case/whitespace-insensitive."""
+    a = {str(x).strip().lower() for x in holdings_a if str(x).strip()}
+    b = {str(x).strip().lower() for x in holdings_b if str(x).strip()}
+    if not a or not b:
+        raise ValueError("fund_overlap: both holding lists must be non-empty")
+    return len(a & b) / min(len(a), len(b))
+
+
+def lookthrough_exposure(direct_weight_pct: float,
+                         fund_positions: list[tuple]) -> dict:
+    """True exposure to one stock: its direct portfolio weight plus the weight held inside
+    owned funds. `fund_positions` = [(fund_weight_pct, stock_pct_inside_fund), ...] where
+    stock_pct_inside_fund is the stock's % within that fund's disclosed holdings."""
+    via_funds = sum(fw * sp / 100.0 for fw, sp in fund_positions)
+    return {
+        "direct_pct": round(direct_weight_pct, 2),
+        "via_funds_pct": round(via_funds, 2),
+        "total_pct": round(direct_weight_pct + via_funds, 2),
+    }
+
+
+def sector_exposure(rows: list[tuple]) -> dict:
+    """Aggregate per-holding (sector, weight) pairs into {sector: weight_pct}, weights
+    renormalised to 100 over the rows provided. Callers pass only holdings whose sector is
+    known; the unknown remainder is reported by the data layer, not hidden here."""
+    total = sum(w for _, w in rows)
+    if total <= 0:
+        raise ValueError("sector_exposure: total weight must be positive")
+    out: dict[str, float] = {}
+    for sector, w in rows:
+        key = sector or "Unknown"
+        out[key] = out.get(key, 0.0) + w / total * 100
+    return {k: round(v, 2) for k, v in sorted(out.items(), key=lambda kv: -kv[1])}
+
+
+def diversification_score(effective_n: float, asset_class_spread: float,
+                          geo_spread: float, overlap_penalty: float) -> float:
+    """Deterministic 0–100 diversification score. EXACT formula (documented in the report's
+    Methodology sheet; must be reproducible):
+
+        40 × min(effective_N / 20, 1)
+      + 20 × asset_class_spread          # 1 − HHI over asset-class weights
+      + 20 × geo_spread                  # 1 − HHI over geography weights
+      + 20 × (1 − overlap_penalty)       # overlap_penalty = max pairwise fund overlap (0–1)
+    """
+    for name, v in (("asset_class_spread", asset_class_spread),
+                    ("geo_spread", geo_spread), ("overlap_penalty", overlap_penalty)):
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"diversification_score: {name} must be within [0, 1]")
+    if effective_n <= 0:
+        raise ValueError("diversification_score: effective_n must be positive")
+    score = (40 * min(effective_n / 20.0, 1.0)
+             + 20 * asset_class_spread
+             + 20 * geo_spread
+             + 20 * (1.0 - overlap_penalty))
+    return round(score, 1)
+
+
 def concentration_stats(holdings: list[dict], flag_threshold: float = 0.10) -> dict:
     """Portfolio concentration from priced holdings. Each holding is
     {"name", "value", "market", "type", "risk"}. Computes weight per holding, HHI

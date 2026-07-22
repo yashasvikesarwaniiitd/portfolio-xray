@@ -44,6 +44,19 @@ def test_parag_parikh_live_reconstruction():
     assert r["xirr_pct"] is not None and -15 < r["xirr_pct"] < 25
 
 
+@pytest.mark.regression
+def test_search_fund_resolves_name_to_code():
+    """A fund NAME must resolve to its AMFI code without asking the user (free AMFI list).
+    Regression for the 'agent demanded a scheme code after being given the name' case."""
+    import json
+    from agent import search_fund
+    r = json.loads(search_fund("Parag Parikh Flexi Cap"))
+    assert r["matches"][0]["fund_code"] == "122639"  # Direct Growth sorts first
+    assert "direct" in r["matches"][0]["scheme_name"].lower()
+    with pytest.raises(ValueError):
+        search_fund("zzz no such fund zzz")
+
+
 # === snapshot aggregation (network-free) ===
 
 def test_aggregate_excludes_unavailable_from_totals():

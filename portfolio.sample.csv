@@ -1,4 +1,7 @@
-﻿ticker,quantity,buy_price,buy_date
-RELIANCE.NS,10,2450,2024-03-15
-INFY.NS,25,1420,2024-07-02
-TCS.NS,5,3890,2025-01-20
+Mode,App,Type,Market,Risk,Where,symbol,source,Estimated Returns (3Y),Total Invested,Mar'25,April'25,May'25,June'25,July'25
+Equity,Groww,Share,India,Med,Reliance Industries,RELIANCE.NS,yfinance,-,15000,5000,5000,5000,-,-
+Equity,Groww,Share,India,Med,Infosys,INFY.NS,yfinance,-,9000,3000,3000,3000,-,-
+Equity,INDMoney,ETF,US,High,iShares S&P 500,IVV,yfinance,-,12000,4000,4000,4000,-,-
+Equity,INDMoney,ETF,US,High,Invesco QQQ,QQQ,yfinance,-,6000,2000,2000,2000,-,-
+Crypto,Groww,Crypto,Global,High,Bitcoin,BTC-USD,crypto,-,4000,-,2000,2000,-,-
+Equity,Smallcase,Basket,India,Med,Manual Basket,,manual,-,5000,5000,-,-,-,-

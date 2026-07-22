@@ -6,3 +6,7 @@ portfolio.csv
 xray.db
 
 .digest_state.json
+
+# generated reports + report data cache
+*.xlsx
+report/.cache.json
