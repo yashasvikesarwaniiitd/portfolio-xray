@@ -152,8 +152,15 @@ async def chat(request: Request):
     ip = request.client.host if request.client else "unknown"
     if not _bump(ip, "chat", CHAT_LIMIT_PER_DAY):
         return _friendly_limit("chat turns", CHAT_LIMIT_PER_DAY)
-    # answer_query routes first: advice/offtopic short-circuit before any tool runs.
-    result = agent.answer_query(client(), list(history), message, {})
+    try:
+        # answer_query routes first: advice/offtopic short-circuit before any tool runs.
+        result = agent.answer_query(client(), list(history), message, {})
+    except Exception:
+        # Missing/invalid API key or upstream outage must degrade, not 500.
+        return JSONResponse(status_code=503, content={
+            "answer": "The analyst brain is unreachable right now (configuration or "
+                      "upstream issue). The deterministic endpoints (/overview, /digest) "
+                      "still work — or try again in a minute."})
     return {"answer": result["answer"], "category": result["category"],
             "refused": result["refused"], "tools_used": result["tools_used"]}
 

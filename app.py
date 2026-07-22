@@ -14,8 +14,16 @@ import streamlit as st
 
 st.set_page_config(page_title="Portfolio X-Ray", page_icon="🩻", layout="wide")
 
-BACKEND = st.secrets.get("BACKEND_URL", os.environ.get("BACKEND_URL",
-                                                       "http://localhost:8000"))
+def _backend_url() -> str:
+    # st.secrets RAISES when no secrets.toml exists anywhere (fresh clone / local dev),
+    # so the env-var fallback must live behind a try, not a .get() default.
+    try:
+        return st.secrets["BACKEND_URL"]
+    except Exception:
+        return os.environ.get("BACKEND_URL", "http://localhost:8000")
+
+
+BACKEND = _backend_url()
 COLD_START_NOTE = ("⏳ Waking the free-tier server (~30s) — worth the wait. "
                    "It sleeps after 15 idle minutes to stay free.")
 

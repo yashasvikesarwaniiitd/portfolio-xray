@@ -9,6 +9,8 @@ services:
     startCommand: uv run uvicorn api:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"        # match local; avoids surprise-3.13 wheel gaps
       - key: ANTHROPIC_API_KEY
         sync: false            # paste in the Render dashboard — never in the repo
       - key: XRAY_DISABLED
