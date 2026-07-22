@@ -5,7 +5,7 @@ don't — true concentration, fund overlap, exact XIRR — and provably refuses 
 advice.**
 
 **Live demo:** `https://<your-app>.streamlit.app` · [Deploy runbook](DEPLOY_RUNBOOK.md) ·
-![evals](https://github.com/<YOUR_USER>/portfolio-xray/actions/workflows/evals.yml/badge.svg)
+![evals](https://github.com/yashasvikesarwaniiitd/portfolio-xray/actions/workflows/evals.yml/badge.svg)
 
 > _[demo GIF placeholder — sample click → refusal chip → report download]_
 
