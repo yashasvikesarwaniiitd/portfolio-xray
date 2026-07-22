@@ -22,7 +22,9 @@ NIFTY50_SYMBOL = "^NSEI"  # yfinance symbol for the NIFTY 50 index
 # Risk-free rate for Sharpe = RBI 10Y G-Sec yield. No reliable free live API exists, so
 # this is UPDATED MANUALLY on a monthly cadence (see CLAUDE.md). Last set 2026-07-21.
 RISK_FREE_RATE = 0.068  # 6.8% p.a.
-DEFAULT_PORTFOLIO = "portfolio.csv"
+# Deployed servers have no personal portfolio.csv (gitignored) — they point this at the
+# committed sample via env so every portfolio tool keeps working publicly.
+DEFAULT_PORTFOLIO = os.environ.get("XRAY_PORTFOLIO", "portfolio.csv")
 # Columns the portfolio CSV must have; the rest are monthly SIP-inflow columns
 # (labelled like "Mar'25") detected by the apostrophe in their name.
 REQUIRED_COLUMNS = ["Where", "symbol", "source", "Total Invested"]

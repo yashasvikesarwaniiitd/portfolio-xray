@@ -1,0 +1,17 @@
+# Render blueprint — backend API on the free tier.
+# The dashboard asks to confirm env vars marked sync:false on first deploy.
+services:
+  - type: web
+    name: portfolio-xray-api
+    runtime: python
+    plan: free
+    buildCommand: pip install uv && uv sync --frozen
+    startCommand: uv run uvicorn api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false            # paste in the Render dashboard — never in the repo
+      - key: XRAY_DISABLED
+        value: "0"             # flip to "1" in the dashboard = instant kill switch
+      - key: XRAY_PORTFOLIO
+        value: portfolio.sample.csv   # the public server analyses the committed sample

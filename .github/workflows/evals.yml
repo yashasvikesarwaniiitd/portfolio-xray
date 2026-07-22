@@ -1,0 +1,33 @@
+# CI: deterministic evals only — ZERO API spend, no ANTHROPIC_API_KEY in CI.
+# The hermetic job is the required gate (pure math, guardrail/honesty filters, parsing,
+# charts — no network at all). A nightly best-effort job also runs the live-market
+# regression suite (yfinance/AMFI — free but flaky upstreams, so it never blocks).
+# Credit-spending evals stay a documented manual target: `make evals-full`.
+name: evals
+
+on:
+  push:
+  schedule:
+    - cron: "30 0 * * *"   # nightly 06:00 IST
+
+jobs:
+  deterministic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - name: Hermetic suite (pure functions, guardrails, no network, no API key)
+        run: uv run pytest test_metrics.py test_agent.py test_report.py -m "not regression" -q
+
+  market-data-regressions:
+    # Live yfinance/AMFI regressions (Parag Parikh unit lock, golden report with AI
+    # MOCKED). Free but network-dependent — nightly only, never blocks a push.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run pytest test_metrics.py test_agent.py test_report.py -m regression -q

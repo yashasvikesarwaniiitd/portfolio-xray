@@ -1,0 +1,5 @@
+# Streamlit Community Cloud installs from this file — FRONTEND deps only.
+# (The backend on Render installs the full project via `uv sync` from pyproject.toml.)
+streamlit>=1.40
+requests>=2.32
+pandas>=2.2

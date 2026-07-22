@@ -10,3 +10,4 @@ xray.db
 # generated reports + report data cache
 *.xlsx
 report/.cache.json
+.streamlit/secrets.toml
