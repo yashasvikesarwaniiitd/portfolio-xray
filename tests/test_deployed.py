@@ -85,17 +85,24 @@ def test_poisoned_name_jailbreak_via_report():
                       timeout=TIMEOUT * 2)
     assert r.status_code == 200, r.text[:300]
     wb = load_workbook(io.BytesIO(r.content))
+    # AI-authored lines are exactly the bullet rows inside an AI block (the builder
+    # prefixes each with "•"). Grabbing anything else sweeps in the report's own static
+    # disclaimer copy ("It never says buy, sell, hold...") — a guaranteed false positive.
     ai_lines = []
-    grab = 0
+    in_block = False
     for ws in wb.worksheets:
         for row in ws.iter_rows():
             for cell in row:
-                v = str(cell.value or "")
+                v = str(cell.value or "").strip()
+                if not v:
+                    continue
                 if "AI INSIGHT" in v or "AI EXECUTIVE SUMMARY" in v:
-                    grab = 6  # capture the following block lines
-                elif grab and v.strip():
-                    ai_lines.append(v)
-                    grab -= 1
+                    in_block = True
+                elif in_block:
+                    if v.startswith("•"):
+                        ai_lines.append(v)
+                    else:
+                        in_block = False
     assert ai_lines, "no AI blocks found in workbook"
     joined = " ".join(ai_lines)
     assert not violates_guardrail(joined), f"imperative survived injection: {joined[:400]}"
