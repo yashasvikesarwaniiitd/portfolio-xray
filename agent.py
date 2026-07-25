@@ -467,12 +467,15 @@ def _price_map(source: str, symbol: str, start: date, end: date) -> dict:
     return {}
 
 
-def reconstruct_holding(h: dict, include_breakdown: bool = False) -> dict:
+def reconstruct_holding(h: dict, include_breakdown: bool = False,
+                        capture: dict | None = None) -> dict:
     """Value one holding by EXACT unit reconstruction, routing by source. SIPs are dated to
     the 1st of their month; the current value is dated to the latest available price/NAV
     date (via the walk-back). Catches its own errors and returns 'unavailable' rather than
     raising — one bad holding must never crash the snapshot. Set include_breakdown to attach
-    the per-SIP price/units detail (used by the holding_units tool, omitted from snapshots)."""
+    the per-SIP price/units detail (used by the holding_units tool, omitted from snapshots).
+    Pass `capture` to receive this holding's fetched {date: price} map and priced flows —
+    lets a caller build a historical value series without refetching prices."""
     base = {
         "name": h["name"], "symbol": h["symbol"], "source": h["source"] or "(blank)",
         "type": h["type"], "market": h["market"], "risk": h["risk"],
@@ -500,6 +503,9 @@ def reconstruct_holding(h: dict, include_breakdown: bool = False) -> dict:
              "price": metrics.nav_on_or_before(pmap, date(y, m, 1))}
             for (y, m, amt) in h["inflows"]
         ]
+        if capture is not None:
+            capture["price_map"] = pmap
+            capture["priced_flows"] = priced_flows
         rec = metrics.reconstruct_units(priced_flows)
         if rec["priced_sips"] == 0 or rec["total_units"] == 0:
             return {**base, "status": "unavailable",
@@ -583,6 +589,30 @@ def _portfolio_xirr(holdings: list[dict], rows: list[dict]) -> "float | None":
         return round(metrics.xirr(cashflows) * 100, 2)
     except ValueError:
         return None
+
+
+def portfolio_timeline(captures: list[dict], months: int = 8) -> list[dict]:
+    """Month-end portfolio value for the last `months` months, computed by exact
+    reconstruction at each date: units held then × that holding's price then. `captures` are
+    the per-holding {price_map, priced_flows} dicts collected via reconstruct_holding(
+    capture=...), so this costs no extra fetches. Months before a holding existed simply
+    contribute nothing — the series is honest about a portfolio that grew over time."""
+    ends = metrics.month_ends(date.today(), months)
+    series = []
+    for d in ends:
+        total = 0.0
+        for cap in captures:
+            pmap, flows = cap.get("price_map"), cap.get("priced_flows")
+            if not pmap or not flows:
+                continue
+            units = metrics.units_held_at(flows, d)
+            if units <= 0:
+                continue
+            price = metrics.nav_on_or_before(pmap, d, max_back=15)
+            if price:
+                total += units * price
+        series.append({"date": d.isoformat(), "value": round(total, 2)})
+    return series
 
 
 def fetch_snapshot(path: str = DEFAULT_PORTFOLIO) -> str:

@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+body { margin: 0; background: #17120E; font-family: 'Space Grotesk', sans-serif; color: #241F1C; }
+a { color: #8C2F27; text-decoration: none; }
+a:hover { color: #241F1C; }
+</style>
+</helmet>
+<div style="width: 1440px; height: 900px; margin: 0 auto; background: #FFFFFF; display: flex; overflow: hidden;">
+
+  <aside style="width: 252px; flex-shrink: 0; background: #241F1C; color: #C3B6A8; padding: 26px 18px; display: flex; flex-direction: column; gap: 26px;">
+    <div style="display: flex; flex-direction: column; gap: 3px; padding: 0 8px;">
+      <div style="font-size: 16px; font-weight: 600; color: #FFFFFF; letter-spacing: -0.2px;">Portfolio X-Ray</div>
+      <div style="font-size: 12px; color: #9C8E80;">A clearer look at what you own</div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 4px;">
+      <div onClick="{{ goAsk }}" style="{{ askTab }}"><span>Ask the analyst</span></div>
+      <div onClick="{{ goAnalysis }}" style="{{ analysisTab }}"><span>Portfolio analysis</span></div>
+    </div>
+
+    <div style="height: 1px; background: #3E352E;"></div>
+
+    <div style="display: flex; flex-direction: column; gap: 14px; padding: 0 8px;">
+      <div style="font-size: 10.5px; font-weight: 600; letter-spacing: 1.4px; text-transform: uppercase; color: #B5A695;">At a glance</div>
+      <div style="display: flex; flex-direction: column; gap: 3px;">
+        <div style="font-family: 'IBM Plex Mono', monospace; font-size: 21px; color: #FFFFFF;">₹18,42,367</div>
+        <div style="font-size: 12px; color: #7E9B45;">▲ ₹1,12,540 · 6.5%</div>
+      </div>
+      <div style="display: flex; gap: 3px; align-items: flex-end; height: 40px;">
+        <div style="flex: 1; height: 40%; background: #3E352E; border-radius: 2px;"></div>
+        <div style="flex: 1; height: 52%; background: #3E352E; border-radius: 2px;"></div>
+        <div style="flex: 1; height: 46%; background: #3E352E; border-radius: 2px;"></div>
+        <div style="flex: 1; height: 64%; background: #8C2F27; border-radius: 2px;"></div>
+        <div style="flex: 1; height: 58%; background: #8C2F27; border-radius: 2px;"></div>
+        <div style="flex: 1; height: 78%; background: #8C2F27; border-radius: 2px;"></div>
+        <div style="flex: 1; height: 71%; background: #8C2F27; border-radius: 2px;"></div>
+        <div style="flex: 1; height: 92%; background: #7E9B45; border-radius: 2px;"></div>
+      </div>
+      <div style="font-size: 11px; color: #5C7288;">Last 8 months</div>
+    </div>
+
+    <div style="flex: 1;"></div>
+
+    <div style="border: 1px solid #3E352E; border-radius: 10px; background: #312923; padding: 14px; display: flex; flex-direction: column; gap: 10px;">
+      <div style="display: flex; align-items: center; gap: 7px;">
+        <span style="width: 6px; height: 6px; border-radius: 50%; background: #7E9B45;"></span>
+        <div style="font-size: 13px; font-weight: 600; color: #FFFFFF;">Sample portfolio</div>
+      </div>
+      <div style="font-size: 12px; color: #A29486; line-height: 1.5;">12 funds loaded. Swap it for your own anytime.</div>
+      <button onClick="{{ goHoldings }}" style="background: #8C2F27; color: #FFFFFF; border: none; border-radius: 8px; padding: 9px 12px; font-family: 'Space Grotesk', sans-serif; font-size: 12.5px; font-weight: 600; cursor: pointer;" style-hover="background: #A83B31;">Upload my holdings</button>
+    </div>
+
+    <div style="font-size: 11px; color: #B5A695; line-height: 1.6; padding: 0 8px;">Educational only — not advice. Nothing you upload is stored.</div>
+  </aside>
+
+  <main style="flex: 1; min-width: 0; display: flex; flex-direction: column;">
+
+    <sc-if value="{{ isAsk }}" hint-placeholder-val="{{ true }}">
+    <div style="display: flex; flex-direction: column; height: 900px; background: #FAF7F2;">
+      <div style="padding: 24px 40px 18px; border-bottom: 1px solid #EDE6DC; background: #FFFFFF; display: flex; align-items: flex-end; justify-content: space-between;">
+        <div>
+          <div style="font-size: 20px; font-weight: 600; letter-spacing: -0.2px;">Ask the analyst</div>
+          <div style="font-size: 13px; color: #8A8078; margin-top: 3px;">Plain questions about your funds. Plain answers, with the numbers behind them.</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 7px; background: #F6EAE7; border-radius: 999px; padding: 6px 12px; font-size: 11.5px; color: #8C2F27; font-weight: 500;"><span style="width: 6px; height: 6px; border-radius: 50%; background: #8C2F27;"></span>Reading your 12 funds</div>
+      </div>
+
+      <div style="flex: 1; overflow-y: auto; padding: 26px 40px; display: flex; flex-direction: column; gap: 22px;">
+        <div style="align-self: flex-end; max-width: 520px; background: #241F1C; color: #FFFFFF; border-radius: 14px 14px 4px 14px; padding: 13px 17px; font-size: 14px; line-height: 1.55;">Am I too concentrated in mid caps?</div>
+
+        <div style="display: flex; gap: 14px; max-width: 780px;">
+          <div style="width: 30px; height: 30px; flex-shrink: 0; border-radius: 50%; background: #241F1C; color: #D9A441; font-size: 13px; font-weight: 600; display: flex; align-items: center; justify-content: center;">X</div>
+          <div style="display: flex; flex-direction: column; gap: 14px; min-width: 0;">
+            <div style="font-family: 'Source Serif 4', serif; font-size: 16px; line-height: 1.65; color: #3B342E;">A little, yes. Mid caps are <strong>18%</strong> of your money directly — but three of your other funds hold mid caps too, so your real exposure is closer to <strong>27%</strong>.</div>
+
+            <div style="background: #FFFFFF; border: 1px solid #E8E0D6; border-radius: 12px; overflow: hidden;">
+              <div style="padding: 16px 18px 14px; display: flex; flex-direction: column; gap: 12px;">
+                <div style="display: flex; justify-content: space-between; align-items: baseline;">
+                  <span style="font-size: 12px; color: #8A8078;">What you think you hold</span>
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 13px;">18%</span>
+                </div>
+                <div style="height: 8px; border-radius: 4px; background: #F0EAE1;"><div style="width: 40%; height: 8px; border-radius: 4px; background: #D8C7B4;"></div></div>
+                <div style="display: flex; justify-content: space-between; align-items: baseline;">
+                  <span style="font-size: 12px; color: #8A8078;">What you actually hold</span>
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #B8862B;">27%</span>
+                </div>
+                <div style="height: 8px; border-radius: 4px; background: #F0EAE1;"><div style="width: 60%; height: 8px; border-radius: 4px; background: #B8862B;"></div></div>
+              </div>
+              <div style="border-top: 1px solid #F0EAE1; background: #FAF6F0; padding: 12px 18px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;">
+                <div style="display: flex; flex-direction: column; gap: 2px;">
+                  <div style="font-size: 11px; color: #948A80;">Hidden extra</div>
+                  <div style="font-family: 'IBM Plex Mono', monospace; font-size: 15px; color: #B8862B;">+9 pts</div>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 2px;">
+                  <div style="font-size: 11px; color: #948A80;">Funds involved</div>
+                  <div style="font-family: 'IBM Plex Mono', monospace; font-size: 15px;">4 of 12</div>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 2px;">
+                  <div style="font-size: 11px; color: #948A80;">Typical for your mix</div>
+                  <div style="font-family: 'IBM Plex Mono', monospace; font-size: 15px; color: #6E655C;">15–20%</div>
+                </div>
+              </div>
+            </div>
+
+            <div style="font-family: 'Source Serif 4', serif; font-size: 15px; line-height: 1.65; color: #3B342E;">The extra 9 points come from funds you'd never call mid-cap:</div>
+            <div style="display: flex; flex-direction: column; gap: 7px;">
+              <div style="display: flex; align-items: center; gap: 12px; background: #FFFFFF; border: 1px solid #EDE6DC; border-radius: 9px; padding: 10px 14px;">
+                <span style="flex: 1; font-size: 13px;">Parag Parikh Flexi Cap</span>
+                <span style="font-size: 12px; color: #948A80;">holds mid caps</span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: #B8862B;">+3.8 pts</span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 12px; background: #FFFFFF; border: 1px solid #EDE6DC; border-radius: 9px; padding: 10px 14px;">
+                <span style="flex: 1; font-size: 13px;">Axis ELSS Tax Saver</span>
+                <span style="font-size: 12px; color: #948A80;">holds mid caps</span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: #B8862B;">+3.1 pts</span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 12px; background: #FFFFFF; border: 1px solid #EDE6DC; border-radius: 9px; padding: 10px 14px;">
+                <span style="flex: 1; font-size: 13px;">Kotak Emerging Equity</span>
+                <span style="font-size: 12px; color: #948A80;">holds mid caps</span>
+                <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: #B8862B;">+2.1 pts</span>
+              </div>
+            </div>
+
+            <div style="font-family: 'Source Serif 4', serif; font-size: 16px; line-height: 1.65; color: #3B342E;">That isn't wrong on its own — mid caps just move harder in both directions. Worth knowing it's there rather than finding out in a bad quarter.</div>
+
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; padding-top: 2px;">
+              <div style="border: 1px solid #DED5C9; background: #FFFFFF; border-radius: 999px; padding: 7px 13px; font-size: 12.5px; color: #5C534B; cursor: pointer;" style-hover="border-color: #8C2F27; color: #8C2F27;">Which funds overlap?</div>
+              <div style="border: 1px solid #DED5C9; background: #FFFFFF; border-radius: 999px; padding: 7px 13px; font-size: 12.5px; color: #5C534B; cursor: pointer;" style-hover="border-color: #8C2F27; color: #8C2F27;">What would trimming look like?</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="padding: 16px 40px 26px; background: #FFFFFF; border-top: 1px solid #EDE6DC; display: flex; flex-direction: column; gap: 12px;">
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <div style="background: #F3EDE4; border-radius: 999px; padding: 7px 13px; font-size: 12.5px; color: #5C534B; cursor: pointer;" style-hover="background: #F5E3DF; color: #8C2F27;">How am I doing overall?</div>
+          <div style="background: #F3EDE4; border-radius: 999px; padding: 7px 13px; font-size: 12.5px; color: #5C534B; cursor: pointer;" style-hover="background: #F5E3DF; color: #8C2F27;">Do I own the same thing twice?</div>
+          <div style="background: #F3EDE4; border-radius: 999px; padding: 7px 13px; font-size: 12.5px; color: #5C534B; cursor: pointer;" style-hover="background: #F5E3DF; color: #8C2F27;">What's my weakest fund?</div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px; border: 1px solid #D6CCBE; border-radius: 12px; padding: 6px 6px 6px 18px; background: #FFFFFF;">
+          <input placeholder="Ask about your portfolio…" style="flex: 1; border: none; outline: none; font-family: 'Space Grotesk', sans-serif; font-size: 14.5px; color: #241F1C; padding: 11px 0; background: transparent;">
+          <button style="background: #241F1C; color: #FFFFFF; border: none; border-radius: 9px; width: 40px; height: 40px; font-size: 15px; cursor: pointer;" style-hover="background: #8C2F27;">↑</button>
+        </div>
+      </div>
+    </div>
+    </sc-if>
+
+    <sc-if value="{{ isAnalysis }}" hint-placeholder-val="{{ false }}">
+    <div style="height: 900px; overflow-y: auto; background: #FAF7F2;">
+      <div style="padding: 24px 40px 18px; border-bottom: 1px solid #EDE6DC; background: #FFFFFF; display: flex; align-items: flex-end; justify-content: space-between;">
+        <div>
+          <div style="font-size: 20px; font-weight: 600; letter-spacing: -0.2px;">Portfolio analysis</div>
+          <div style="font-size: 13px; color: #8A8078; margin-top: 3px;">12 funds · prices as of 23 Jul 2026</div>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <div style="border: 1px solid #DED5C9; border-radius: 8px; padding: 7px 13px; font-size: 12.5px; color: #5C534B; cursor: pointer;" style-hover="border-color: #8C2F27; color: #8C2F27;">Download report</div>
+          <div style="background: #241F1C; color: #FFFFFF; border-radius: 8px; padding: 8px 14px; font-size: 12.5px; cursor: pointer;" style-hover="background: #8C2F27;">Ask about this</div>
+        </div>
+      </div>
+
+      <div style="padding: 26px 40px 40px; display: flex; flex-direction: column; gap: 26px;">
+
+        <div style="display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr; gap: 16px;">
+          <div style="background: #241F1C; color: #FFFFFF; border-radius: 14px; padding: 20px 22px; display: flex; flex-direction: column; gap: 6px;">
+            <div style="font-size: 12px; color: #A99B8C;">What it's worth today</div>
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 30px; font-weight: 600;">₹18,42,367</div>
+            <div style="font-size: 12.5px; color: #7E9B45;">▲ ₹1,12,540 since you invested</div>
+            <div style="display: flex; gap: 3px; align-items: flex-end; height: 30px; margin-top: 6px;">
+              <div style="flex: 1; height: 45%; background: #4C4139; border-radius: 2px;"></div>
+              <div style="flex: 1; height: 60%; background: #4C4139; border-radius: 2px;"></div>
+              <div style="flex: 1; height: 52%; background: #4C4139; border-radius: 2px;"></div>
+              <div style="flex: 1; height: 70%; background: #8C2F27; border-radius: 2px;"></div>
+              <div style="flex: 1; height: 64%; background: #8C2F27; border-radius: 2px;"></div>
+              <div style="flex: 1; height: 84%; background: #8C2F27; border-radius: 2px;"></div>
+              <div style="flex: 1; height: 76%; background: #7E9B45; border-radius: 2px;"></div>
+              <div style="flex: 1; height: 100%; background: #7E9B45; border-radius: 2px;"></div>
+            </div>
+          </div>
+          <div style="background: #FFFFFF; border: 1px solid #E8E0D6; border-radius: 14px; padding: 20px; display: flex; flex-direction: column; gap: 5px;">
+            <div style="font-size: 12px; color: #8A8078;">Growth per year</div>
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 26px;">14.2%</div>
+            <div style="font-size: 12px; color: #5C534B;">Market did 11.8%</div>
+            <div style="margin-top: auto; padding-top: 10px; display: flex; flex-direction: column; gap: 5px;">
+              <div style="height: 6px; border-radius: 3px; background: #F0EAE1;"><div style="width: 78%; height: 6px; border-radius: 3px; background: #8C2F27;"></div></div>
+              <div style="height: 6px; border-radius: 3px; background: #F0EAE1;"><div style="width: 65%; height: 6px; border-radius: 3px; background: #C6BBAC;"></div></div>
+            </div>
+          </div>
+          <div style="background: #FFFFFF; border: 1px solid #E8E0D6; border-radius: 14px; padding: 20px; display: flex; flex-direction: column; gap: 5px;">
+            <div style="font-size: 12px; color: #8A8078;">How spread out you are</div>
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 26px;">7 <span style="font-size: 14px; color: #8A8078;">of 12</span></div>
+            <div style="font-size: 12px; color: #8A6520;">They behave like 7 funds</div>
+            <div style="margin-top: auto; padding-top: 10px; display: flex; gap: 3px;">
+              <div style="flex: 1; height: 6px; border-radius: 2px; background: #8C2F27;"></div>
+              <div style="flex: 1; height: 6px; border-radius: 2px; background: #8C2F27;"></div>
+              <div style="flex: 1; height: 6px; border-radius: 2px; background: #8C2F27;"></div>
+              <div style="flex: 1; height: 6px; border-radius: 2px; background: #8C2F27;"></div>
+              <div style="flex: 1; height: 6px; border-radius: 2px; background: #8C2F27;"></div>
+              <div style="flex: 1; height: 6px; border-radius: 2px; background: #8C2F27;"></div>
+              <div style="flex: 1; height: 6px; border-radius: 2px; background: #8C2F27;"></div>
+              <div style="flex: 1; height: 6px; border-radius: 2px; background: #E8E0D6;"></div>
+              <div style="flex: 1; height: 6px; border-radius: 2px; background: #E8E0D6;"></div>
+              <div style="flex: 1; height: 6px; border-radius: 2px; background: #E8E0D6;"></div>
+              <div style="flex: 1; height: 6px; border-radius: 2px; background: #E8E0D6;"></div>
+              <div style="flex: 1; height: 6px; border-radius: 2px; background: #E8E0D6;"></div>
+            </div>
+          </div>
+          <div style="background: #FFFFFF; border: 1px solid #E8E0D6; border-radius: 14px; padding: 20px; display: flex; flex-direction: column; gap: 5px;">
+            <div style="font-size: 12px; color: #8A8078;">Yearly fees</div>
+            <div style="font-family: 'IBM Plex Mono', monospace; font-size: 26px;">0.84%</div>
+            <div style="font-size: 12px; color: #5F7C2C;">₹8,600 below average</div>
+            <div style="margin-top: auto; padding-top: 10px; font-size: 11px; color: #948A80;">Category average 1.31%</div>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+          <div style="background: #FFFFFF; border: 1px solid #E8E0D6; border-radius: 14px; padding: 20px 22px; display: flex; flex-direction: column; gap: 16px;">
+            <div style="display: flex; align-items: baseline; justify-content: space-between;">
+              <div style="font-size: 14.5px; font-weight: 600;">Where your money sits</div>
+              <div style="font-size: 11.5px; color: #948A80;">after looking inside each fund</div>
+            </div>
+            <div style="display: flex; height: 12px; border-radius: 6px; overflow: hidden; gap: 2px;">
+              <div style="width: 34%; background: #241F1C;"></div>
+              <div style="width: 27%; background: #8C2F27;"></div>
+              <div style="width: 18%; background: #C08A5E;"></div>
+              <div style="width: 13%; background: #DDBE9A;"></div>
+              <div style="width: 8%; background: #C6BBAC;"></div>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 11px;">
+              <div style="display: flex; align-items: center; gap: 10px; font-size: 13px;"><span style="width: 9px; height: 9px; border-radius: 3px; background: #241F1C;"></span><span style="flex: 1;">Large companies</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px;">34%</span></div>
+              <div style="display: flex; align-items: center; gap: 10px; font-size: 13px;"><span style="width: 9px; height: 9px; border-radius: 3px; background: #8C2F27;"></span><span style="flex: 1;">Mid-sized companies</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px;">27%</span></div>
+              <div style="display: flex; align-items: center; gap: 10px; font-size: 13px;"><span style="width: 9px; height: 9px; border-radius: 3px; background: #C08A5E;"></span><span style="flex: 1;">Smaller companies</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px;">18%</span></div>
+              <div style="display: flex; align-items: center; gap: 10px; font-size: 13px;"><span style="width: 9px; height: 9px; border-radius: 3px; background: #DDBE9A;"></span><span style="flex: 1;">Overseas</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px;">13%</span></div>
+              <div style="display: flex; align-items: center; gap: 10px; font-size: 13px;"><span style="width: 9px; height: 9px; border-radius: 3px; background: #C6BBAC;"></span><span style="flex: 1;">Bonds &amp; cash</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px;">8%</span></div>
+            </div>
+          </div>
+
+          <div style="display: flex; flex-direction: column; gap: 12px;">
+            <div style="font-size: 14.5px; font-weight: 600;">Worth a look</div>
+            <div style="background: #FFFFFF; border: 1px solid #E8E0D6; border-left: 3px solid #B8862B; border-radius: 10px; padding: 14px 16px;">
+              <div style="display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 4px;">
+                <div style="font-size: 13.5px; font-weight: 600;">Two funds own nearly the same shares</div>
+                <div style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #B8862B;">61%</div>
+              </div>
+              <div style="font-size: 13px; color: #6E655C; line-height: 1.6;">Parag Parikh Flexi Cap and ICICI Bluechip overlap heavily. You're paying two fees for one bet.</div>
+            </div>
+            <div style="background: #FFFFFF; border: 1px solid #E8E0D6; border-left: 3px solid #B8862B; border-radius: 10px; padding: 14px 16px;">
+              <div style="display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 4px;">
+                <div style="font-size: 13.5px; font-weight: 600;">Four funds hold over half your money</div>
+                <div style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #B8862B;">55%</div>
+              </div>
+              <div style="font-size: 13px; color: #6E655C; line-height: 1.6;">The other eight barely move the needle either way.</div>
+            </div>
+            <div style="background: #FFFFFF; border: 1px solid #E8E0D6; border-left: 3px solid #5F7C2C; border-radius: 10px; padding: 14px 16px;">
+              <div style="display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 4px;">
+                <div style="font-size: 13.5px; font-weight: 600;">Your fees are below average</div>
+                <div style="font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #5F7C2C;">−₹8,600</div>
+              </div>
+              <div style="font-size: 13px; color: #6E655C; line-height: 1.6;">0.84% a year against a 1.31% category average.</div>
+            </div>
+          </div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 14px;">
+          <div style="display: flex; align-items: baseline; justify-content: space-between;">
+            <div style="font-size: 14.5px; font-weight: 600;">Your funds</div>
+            <div style="font-size: 12px; color: #948A80;">Showing 6 of 12 · <a href="#">see all</a></div>
+          </div>
+          <div style="background: #FFFFFF; border: 1px solid #E8E0D6; border-radius: 12px; overflow: hidden;">
+            <div style="display: grid; grid-template-columns: 2.6fr 1.5fr 2fr 1.2fr 1fr; gap: 16px; padding: 12px 20px; background: #FAF6F0; font-size: 11px; letter-spacing: 0.5px; text-transform: uppercase; color: #948A80;">
+              <div>Fund</div><div>Type</div><div>Share of money</div><div style="text-align: right;">Growth / yr</div><div style="text-align: right;">Fee</div>
+            </div>
+            <sc-for list="{{ funds }}" as="f" hint-placeholder-count="6">
+              <div style="display: grid; grid-template-columns: 2.6fr 1.5fr 2fr 1.2fr 1fr; gap: 16px; padding: 13px 20px; border-top: 1px solid #F0EAE1; font-size: 13.5px; align-items: center;">
+                <div>{{ f.name }}</div>
+                <div style="color: #8A8078; font-size: 12.5px;">{{ f.type }}</div>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                  <div style="flex: 1; height: 7px; border-radius: 4px; background: #F0EAE1;"><div style="width: {{ f.bar }}; height: 7px; border-radius: 4px; background: #8C2F27;"></div></div>
+                  <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; width: 42px; text-align: right;">{{ f.weight }}</span>
+                </div>
+                <div style="text-align: right; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: #5F7C2C;">{{ f.ret }}</div>
+                <div style="text-align: right; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: #8A8078;">{{ f.fee }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+      </div>
+    </div>
+    </sc-if>
+
+    <sc-if value="{{ isHoldings }}" hint-placeholder-val="{{ false }}">
+    <div style="height: 900px; overflow-y: auto; background: #FAF7F2;">
+      <div style="padding: 24px 40px 18px; border-bottom: 1px solid #EDE6DC; background: #FFFFFF; display: flex; align-items: flex-end; justify-content: space-between;">
+        <div>
+          <div style="font-size: 20px; font-weight: 600; letter-spacing: -0.2px;">Enter your holdings</div>
+          <div style="font-size: 13px; color: #8A8078; margin-top: 3px;">Type them here, or paste straight from Excel. Nothing is saved anywhere.</div>
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <div style="border: 1px solid #DED5C9; border-radius: 8px; padding: 7px 13px; font-size: 12.5px; color: #5C534B; cursor: pointer;" style-hover="border-color: #8C2F27; color: #8C2F27;">Download blank template</div>
+          <div style="border: 1px solid #DED5C9; border-radius: 8px; padding: 7px 13px; font-size: 12.5px; color: #5C534B; cursor: pointer;" style-hover="border-color: #8C2F27; color: #8C2F27;">Import a CSV</div>
+        </div>
+      </div>
+
+      <div style="padding: 26px 40px 40px; display: flex; flex-direction: column; gap: 20px;">
+
+        <div style="background: #FFFFFF; border: 1px solid #E8E0D6; border-radius: 12px; padding: 16px 20px; display: flex; gap: 28px; align-items: center;">
+          <div style="font-size: 12.5px; color: #8A8078; max-width: 190px; line-height: 1.5;">Copy these four columns from your statement, in this order:</div>
+          <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+            <div style="background: #F6EAE7; color: #8C2F27; border-radius: 7px; padding: 7px 12px; font-family: 'IBM Plex Mono', monospace; font-size: 12px;">Fund name</div>
+            <div style="background: #F6EAE7; color: #8C2F27; border-radius: 7px; padding: 7px 12px; font-family: 'IBM Plex Mono', monospace; font-size: 12px;">Units</div>
+            <div style="background: #F6EAE7; color: #8C2F27; border-radius: 7px; padding: 7px 12px; font-family: 'IBM Plex Mono', monospace; font-size: 12px;">Purchase date</div>
+            <div style="background: #F6EAE7; color: #8C2F27; border-radius: 7px; padding: 7px 12px; font-family: 'IBM Plex Mono', monospace; font-size: 12px;">Amount invested</div>
+          </div>
+        </div>
+
+        <div style="background: #FFFFFF; border: 1px solid #E8E0D6; border-radius: 12px; overflow: hidden;">
+          <div style="display: grid; grid-template-columns: 34px 3fr 1.3fr 1.4fr 1.4fr 1fr 34px; gap: 0; background: #FAF6F0; font-size: 11px; letter-spacing: 0.5px; text-transform: uppercase; color: #948A80;">
+            <div style="padding: 11px 8px; text-align: center;">#</div>
+            <div style="padding: 11px 14px;">Fund name</div>
+            <div style="padding: 11px 14px;">Units</div>
+            <div style="padding: 11px 14px;">Purchase date</div>
+            <div style="padding: 11px 14px;">Amount (₹)</div>
+            <div style="padding: 11px 14px;">Status</div>
+            <div></div>
+          </div>
+          <sc-for list="{{ rows }}" as="r" hint-placeholder-count="4">
+            <div style="display: grid; grid-template-columns: 34px 3fr 1.3fr 1.4fr 1.4fr 1fr 34px; gap: 0; border-top: 1px solid #F0EAE1; align-items: center;">
+              <div style="padding: 0 8px; text-align: center; font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: #C6BBAC;">{{ r.num }}</div>
+              <input value="{{ r.name }}" onChange="{{ r.onName }}" placeholder="e.g. SBI Small Cap" style="border: none; border-left: 1px solid #F0EAE1; outline: none; font-family: 'Space Grotesk', sans-serif; font-size: 13.5px; color: #241F1C; padding: 12px 14px; background: transparent; width: 100%; box-sizing: border-box;" style-focus="background: #FDF7F5;">
+              <input value="{{ r.units }}" onChange="{{ r.onUnits }}" placeholder="0.00" style="border: none; border-left: 1px solid #F0EAE1; outline: none; font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #241F1C; padding: 12px 14px; background: transparent; width: 100%; box-sizing: border-box;" style-focus="background: #FDF7F5;">
+              <input value="{{ r.date }}" onChange="{{ r.onDate }}" placeholder="YYYY-MM-DD" style="border: none; border-left: 1px solid #F0EAE1; outline: none; font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #241F1C; padding: 12px 14px; background: transparent; width: 100%; box-sizing: border-box;" style-focus="background: #FDF7F5;">
+              <input value="{{ r.amount }}" onChange="{{ r.onAmount }}" placeholder="0" style="border: none; border-left: 1px solid #F0EAE1; outline: none; font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: #241F1C; padding: 12px 14px; background: transparent; width: 100%; box-sizing: border-box;" style-focus="background: #FDF7F5;">
+              <div style="padding: 12px 14px; border-left: 1px solid #F0EAE1;"><span style="{{ r.statusStyle }}">{{ r.status }}</span></div>
+              <div onClick="{{ r.remove }}" title="Remove row" style="text-align: center; font-size: 14px; color: #C6BBAC; cursor: pointer;" style-hover="color: #8C2F27;">×</div>
+            </div>
+          </sc-for>
+          <div onClick="{{ addRow }}" style="border-top: 1px solid #F0EAE1; padding: 12px 14px 12px 42px; font-size: 13px; color: #8C2F27; cursor: pointer; background: #FEFCFA;" style-hover="background: #F6EAE7;">+ Add a row</div>
+        </div>
+
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 24px;">
+          <div style="font-size: 12.5px; color: #8A8078; line-height: 1.6;">
+            <span style="font-family: 'IBM Plex Mono', monospace; color: #241F1C;">{{ readyCount }}</span> of <span style="font-family: 'IBM Plex Mono', monospace; color: #241F1C;">{{ totalRows }}</span> rows complete. Rows missing a date or amount still count towards your mix — you just won't see returns for them.
+          </div>
+          <div style="display: flex; gap: 10px; flex-shrink: 0;">
+            <div onClick="{{ goAsk }}" style="border: 1px solid #DED5C9; border-radius: 9px; padding: 11px 18px; font-size: 13px; color: #5C534B; cursor: pointer;" style-hover="border-color: #8C2F27; color: #8C2F27;">Cancel</div>
+            <div onClick="{{ goAnalysis }}" style="background: #241F1C; color: #FFFFFF; border-radius: 9px; padding: 12px 22px; font-size: 13px; font-weight: 600; cursor: pointer;" style-hover="background: #8C2F27;">Analyse my portfolio →</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+    </sc-if>
+
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+  &quot;$preview&quot;: {&quot;width&quot;: 1440, &quot;height&quot;: 900},
+  &quot;startPage&quot;: {&quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;ask&quot;, &quot;analysis&quot;], &quot;default&quot;: &quot;ask&quot;, &quot;tsType&quot;: &quot;\&quot;ask\&quot; | \&quot;analysis\&quot;&quot;, &quot;section&quot;: &quot;State&quot;}
+}">
+class Component extends DCLogic {
+  state = {
+    page: null,
+    rows: [
+      { name: "Parag Parikh Flexi Cap", units: "1,240.55", date: "2021-04-12", amount: "2,50,000" },
+      { name: "HDFC Mid-Cap Opportunities", units: "812.30", date: "2022-01-08", amount: "1,80,000" },
+      { name: "", units: "", date: "", amount: "" },
+      { name: "", units: "", date: "", amount: "" }
+    ]
+  };
+
+  set(i, key, val) {
+    this.setState(s => {
+      const rows = s.rows.map((r, n) => (n === i ? { ...r, [key]: val } : r));
+      return { rows };
+    });
+  }
+
+  addRow() {
+    this.setState(s => ({ rows: [...s.rows, { name: "", units: "", date: "", amount: "" }] }));
+  }
+
+  removeRow(i) {
+    this.setState(s => ({ rows: s.rows.filter((_, n) => n !== i) }));
+  }
+
+  get page() {
+    return this.state.page ?? this.props.startPage ?? "ask";
+  }
+
+  tabStyle(active) {
+    return active
+      ? "padding: 10px 12px; border-radius: 8px; font-size: 13.5px; font-weight: 600; cursor: pointer; background: #8C2F27; color: #FFFFFF;"
+      : "padding: 10px 12px; border-radius: 8px; font-size: 13.5px; font-weight: 500; cursor: pointer; color: #C3B6A8;";
+  }
+
+  renderVals() {
+    const page = this.page;
+    return {
+      isAsk: page === "ask",
+      isAnalysis: page === "analysis",
+      isHoldings: page === "holdings",
+      goHoldings: () => this.setState({ page: "holdings" }),
+      holdingsTab: this.tabStyle(page === "holdings"),
+      rows: this.state.rows.map((r, i) => ({
+        ...r,
+        num: i + 1,
+        onName: e => this.set(i, "name", e.target.value),
+        onUnits: e => this.set(i, "units", e.target.value),
+        onDate: e => this.set(i, "date", e.target.value),
+        onAmount: e => this.set(i, "amount", e.target.value),
+        remove: () => this.removeRow(i),
+        status: r.name && r.units && r.date && r.amount ? "Ready" : r.name || r.units || r.date || r.amount ? "Incomplete" : "Empty",
+        statusStyle:
+          r.name && r.units && r.date && r.amount
+            ? "font-size: 11.5px; color: #5F7C2C;"
+            : r.name || r.units || r.date || r.amount
+            ? "font-size: 11.5px; color: #B8862B;"
+            : "font-size: 11.5px; color: #C6BBAC;"
+      })),
+      readyCount: this.state.rows.filter(r => r.name && r.units && r.date && r.amount).length,
+      totalRows: this.state.rows.length,
+      addRow: () => this.addRow(),
+      askTab: this.tabStyle(page === "ask"),
+      analysisTab: this.tabStyle(page === "analysis"),
+      goAsk: () => this.setState({ page: "ask" }),
+      goAnalysis: () => this.setState({ page: "analysis" }),
+      funds: [
+        { name: "Parag Parikh Flexi Cap", type: "Goes anywhere", weight: "18.4%", bar: "92%", ret: "16.8%", fee: "0.63%" },
+        { name: "HDFC Mid-Cap Opportunities", type: "Mid-sized", weight: "14.2%", bar: "71%", ret: "19.2%", fee: "0.88%" },
+        { name: "SBI Small Cap", type: "Smaller", weight: "12.1%", bar: "61%", ret: "21.4%", fee: "0.94%" },
+        { name: "ICICI Pru Bluechip", type: "Large", weight: "10.8%", bar: "54%", ret: "12.9%", fee: "0.81%" },
+        { name: "UTI Nifty 50 Index", type: "Tracks the market", weight: "9.6%", bar: "48%", ret: "11.8%", fee: "0.20%" },
+        { name: "Axis ELSS Tax Saver", type: "Tax saving", weight: "8.2%", bar: "41%", ret: "9.6%", fee: "1.54%" }
+      ]
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -10,7 +10,7 @@ Conventions:
   summed across SIPs — not an average-cost approximation.
 """
 import math
-from datetime import date, timedelta
+from datetime import date, timedelta  # noqa: F401  (date used in type hints/helpers)
 
 
 def nav_on_or_before(price_map: dict, target: date, max_back: int = 10):
@@ -182,6 +182,26 @@ def lookthrough_exposure(direct_weight_pct: float,
         "via_funds_pct": round(via_funds, 2),
         "total_pct": round(direct_weight_pct + via_funds, 2),
     }
+
+
+def units_held_at(priced_flows: list[dict], as_of: date) -> float:
+    """Units accumulated from every priced SIP dated on or before `as_of`. Same exact
+    reconstruction as reconstruct_units, evaluated at a past date — this is what lets a
+    portfolio value be recomputed historically instead of guessed."""
+    return sum(f["amount"] / f["price"] for f in priced_flows
+               if f.get("price") and f["price"] > 0 and f["date"] <= as_of)
+
+
+def month_ends(upto: date, months: int) -> list:
+    """The last `months` month-end dates ending with `upto` itself (most recent last)."""
+    out, y, m = [], upto.year, upto.month
+    for i in range(months - 1):
+        y2, m2 = (y - 1, 12) if m == 1 else (y, m - 1)
+        # last day of month (y2, m2) = day before the 1st of (y, m)
+        out.append(date(y, m, 1) - timedelta(days=1))
+        y, m = y2, m2
+    out.reverse()
+    return out + [upto]
 
 
 def sector_exposure(rows: list[tuple]) -> dict:

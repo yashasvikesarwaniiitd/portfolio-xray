@@ -1,0 +1,11 @@
+# Design tokens from the approved Claude Design (warm paper / ink / rust palette).
+# Safe to commit — secrets live in .streamlit/secrets.toml, which is gitignored.
+[theme]
+base = "light"
+primaryColor = "#8C2F27"
+backgroundColor = "#FAF7F2"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#241F1C"
+
+[client]
+toolbarMode = "minimal"

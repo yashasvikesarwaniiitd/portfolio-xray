@@ -48,6 +48,28 @@ def test_sector_exposure_renormalises():
     assert s["Financials"] == pytest.approx(25.0)
 
 
+def test_units_held_at_is_cumulative_and_date_bounded():
+    """The dashboard's value timeline stands on this: units at a PAST date must count only
+    SIPs on or before it, using each SIP's own price."""
+    from datetime import date
+    flows = [{"date": date(2025, 3, 1), "amount": 1000.0, "price": 10.0},   # 100 units
+             {"date": date(2025, 6, 1), "amount": 2000.0, "price": 20.0},   # 100 units
+             {"date": date(2025, 9, 1), "amount": 500.0, "price": None}]    # unpriced
+    assert metrics.units_held_at(flows, date(2025, 2, 1)) == 0.0
+    assert metrics.units_held_at(flows, date(2025, 4, 30)) == pytest.approx(100.0)
+    assert metrics.units_held_at(flows, date(2025, 12, 31)) == pytest.approx(200.0)
+
+
+def test_month_ends_are_real_month_boundaries():
+    from datetime import date
+    ends = metrics.month_ends(date(2026, 7, 26), 8)
+    assert len(ends) == 8
+    assert ends[-1] == date(2026, 7, 26)          # window ends today, not a month end
+    assert ends[0] == date(2025, 12, 31)
+    assert date(2026, 2, 28) in ends              # non-leap February handled
+    assert ends == sorted(ends)
+
+
 def test_diversification_score_exact_formula_reproducible():
     # 40×min(16/20,1) + 20×0.8 + 20×0.5 + 20×(1−0.55) = 32 + 16 + 10 + 9 = 67.0
     assert metrics.diversification_score(16, 0.8, 0.5, 0.55) == 67.0

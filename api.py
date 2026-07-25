@@ -202,6 +202,97 @@ async def overview(request: Request, file: UploadFile | None = None):
                 pass
 
 
+def _nifty_window_return(first_flow: date | None) -> dict | None:
+    """NIFTY 50 point-to-point return over the SAME window as the portfolio's life, so the
+    dashboard can show a market reference next to XIRR. Labelled honestly in the UI: this is
+    an index point-to-point figure, not a money-weighted one."""
+    if not first_flow:
+        return None
+    try:
+        pmap = agent._price_map("yfinance", agent.NIFTY50_SYMBOL, first_flow, date.today())
+        if len(pmap) < 2:
+            return None
+        d0, d1 = min(pmap), max(pmap)
+        start, end = pmap[d0], pmap[d1]
+        years = max((d1 - d0).days / 365.0, 0.08)
+        total = (end / start - 1) * 100
+        annualised = ((end / start) ** (1 / years) - 1) * 100 if years >= 1 else total
+        return {"symbol": "NIFTY 50", "from": d0.isoformat(), "to": d1.isoformat(),
+                "total_pct": round(total, 2), "annualised_pct": round(annualised, 2),
+                "annualised": years >= 1}
+    except Exception:
+        return None
+
+
+@app.post("/analysis")
+@app.get("/analysis")
+async def analysis(request: Request, file: UploadFile | None = None):
+    """Everything the dashboard needs, in one deterministic call: snapshot + month-end value
+    timeline + the report engine's computed sections (allocation, diversification,
+    concentration, overlap, cost, questions) + a market reference. No LLM, so it's free to
+    serve — the AI only ever appears in /chat and the Excel report's insight blocks."""
+    try:
+        path, is_temp = await _portfolio_path_from(request, file)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    try:
+        from report import data as report_data
+
+        holdings, skipped = agent.read_portfolio(path)
+        captures: list[dict] = []
+        rows = []
+        for h in holdings:
+            cap: dict = {}
+            rows.append(agent.reconstruct_holding(h, capture=cap))
+            captures.append(cap)
+        snap = agent.aggregate_snapshot(rows)
+        snap["portfolio_xirr_pct"] = agent._portfolio_xirr(holdings, rows)
+
+        level = report_data.detect_level(holdings)
+        cache = report_data._load_cache()
+        wrows = report_data.holdings_with_weights(holdings, level)
+        total_value = sum(r["value"] for r in wrows)
+
+        def safe(fn, *a):
+            try:
+                return fn(*a)
+            except Exception as e:
+                return {"error": f"data unavailable: {e}"}
+
+        sections = {"overlap": safe(report_data.section_overlap, wrows, cache)}
+        penalty = min((sections["overlap"].get("max_overlap_pct") or 0) / 100, 1)
+        sections["allocation"] = safe(report_data.section_allocation, wrows, cache)
+        sections["diversification"] = safe(report_data.section_diversification, wrows, penalty)
+        sections["concentration"] = safe(report_data.section_concentration, wrows, cache)
+        if report_data.LEVELS[level] >= 2:
+            sections["cost"] = safe(report_data.section_cost, wrows, cache, total_value)
+        sections["questions"] = safe(report_data.section_questions, sections)
+        report_data._save_cache(cache)
+
+        first = min((date(y, m, 1) for h in holdings for (y, m, _) in h["inflows"]),
+                    default=None)
+        return {
+            "level": level,
+            "snapshot": snap,
+            "timeline": agent.portfolio_timeline(captures) if captures else [],
+            "sections": sections,
+            "market": _nifty_window_return(first),
+            "holdings_priced": snap["priced_count"],
+            "holdings_total": snap["total_count"],
+            "skipped_rows": skipped,
+        }
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"analysis failed: {e}"})
+    finally:
+        if is_temp:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 @app.post("/report")
 async def report(request: Request, file: UploadFile | None = None, no_ai: int = 0):
     ip = request.client.host if request.client else "unknown"
