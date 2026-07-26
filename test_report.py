@@ -48,6 +48,48 @@ def test_sector_exposure_renormalises():
     assert s["Financials"] == pytest.approx(25.0)
 
 
+# --- frontend prose rendering (pure; no Streamlit) ----------------------------------------
+
+def test_numbered_list_renders_as_ol_not_a_run_on_paragraph():
+    """Regression: the model enumerates fund variants with 1. 2. 3.; those lines used to
+    fall through to the paragraph path and get joined with spaces on one line."""
+    from uiformat import md_to_html
+    md = ("I found several variants. Which one?\n"
+          "1. **Axis ... Direct Plan - Growth** (Code: 148485) — commonly chosen\n"
+          "2. **Axis ... Direct Plan - IDCW** (Code: 148487)\n"
+          "3. **Axis ... Regular Plan - Growth** (Code: 148486)\n")
+    out = md_to_html(md)
+    assert out.count("<li>") == 3
+    assert "<ol>" in out and "</ol>" in out
+    assert "148485" in out and "148487" in out
+    # the tell-tale of the bug: two items concatenated inside one text run
+    assert "commonly chosen 2." not in out
+
+
+def test_bulleted_and_numbered_lists_do_not_bleed_into_each_other():
+    from uiformat import md_to_html
+    out = md_to_html("- alpha\n- beta\n\n1. one\n2. two\n\nclosing line")
+    assert out.count("<ul>") == 1 and out.count("</ul>") == 1
+    assert out.count("<ol>") == 1 and out.count("</ol>") == 1
+    assert out.endswith("<p>closing line</p>")
+
+
+def test_inline_markdown_and_escaping():
+    from uiformat import md_to_html
+    out = md_to_html("**HHI** is `0.062` for <script>alert(1)</script>")
+    assert "<strong>HHI</strong>" in out and "<code>0.062</code>" in out
+    assert "&lt;script&gt;" in out and "<script>" not in out
+
+
+def test_indian_digit_grouping():
+    from uiformat import inr, pct
+    assert inr(1842367) == "₹18,42,367"
+    assert inr(48502) == "₹48,502"
+    assert inr(-2502) == "-₹2,502"
+    assert inr(None) == "—"
+    assert pct(4.13) == "4.1%" and pct(4.13, signed=True) == "+4.1%"
+
+
 def test_units_held_at_is_cumulative_and_date_bounded():
     """The dashboard's value timeline stands on this: units at a PAST date must count only
     SIPs on or before it, using each SIP's own price."""

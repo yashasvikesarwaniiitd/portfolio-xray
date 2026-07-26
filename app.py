@@ -63,76 +63,8 @@ def call_json(method: str, path: str, cold_slot=None, **kw):
 
 # ---------------------------------------------------------------- formatting helpers
 
-def inr(n, decimals: int = 0) -> str:
-    """Indian digit grouping: ₹18,42,367 (last three, then pairs) — as in the design."""
-    if n is None:
-        return "—"
-    try:
-        n = float(n)
-    except (TypeError, ValueError):
-        return "—"
-    sign = "-" if n < 0 else ""
-    whole = f"{abs(n):.{decimals}f}"
-    frac = ""
-    if "." in whole:
-        whole, frac = whole.split(".")
-        frac = "." + frac
-    if len(whole) > 3:
-        head, tail = whole[:-3], whole[-3:]
-        head = re.sub(r"(\d)(?=(\d\d)+$)", r"\1,", head)
-        whole = head + "," + tail
-    return f"{sign}₹{whole}{frac}"
-
-
-def pct(n, decimals: int = 1, signed: bool = False) -> str:
-    if n is None:
-        return "—"
-    return f"{n:+.{decimals}f}%" if signed else f"{n:.{decimals}f}%"
-
-
-def md_to_html(text: str) -> str:
-    """Minimal markdown → HTML so assistant prose can live inside the design's serif
-    block: escapes first, then **bold**, `code`, bullet lists and paragraphs."""
-    out, buf, lines = [], [], (text or "").split("\n")
-
-    def flush_para():
-        if buf:
-            out.append("<p>" + " ".join(buf) + "</p>")
-            buf.clear()
-
-    def inline(s: str) -> str:
-        s = _html.escape(s)
-        s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
-        s = re.sub(r"`(.+?)`", r"<code>\1</code>", s)
-        s = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", r'<a href="\2">\1</a>', s)
-        return s
-
-    in_list = False
-    for raw in lines:
-        line = raw.rstrip()
-        bullet = re.match(r"^\s*[-*•]\s+(.*)$", line)
-        heading = re.match(r"^#{1,6}\s+(.*)$", line)
-        if bullet:
-            flush_para()
-            if not in_list:
-                out.append("<ul>")
-                in_list = True
-            out.append("<li>" + inline(bullet.group(1)) + "</li>")
-            continue
-        if in_list:
-            out.append("</ul>")
-            in_list = False
-        if not line.strip():
-            flush_para()
-        elif heading:
-            flush_para()
-            out.append("<p><strong>" + inline(heading.group(1)) + "</strong></p>")
-        else:
-            buf.append(inline(line))
-    if in_list:
-        out.append("</ul>")
-    flush_para()
-    return "".join(out)
+# Formatting lives in uiformat.py — pure and unit-tested (no Streamlit import).
+from uiformat import inr, md_to_html, pct  # noqa: E402
 
 
 # ---------------------------------------------------------------- design system (CSS)
@@ -253,8 +185,14 @@ html, body, [class*="css"], .stApp, button, input, textarea, select {
 .prose { font-family: 'Source Serif 4', serif; font-size: 16px; line-height: 1.65;
   color: #3B342E; min-width: 0; }
 .prose p { margin: 0 0 10px; }
-.prose ul { margin: 4px 0 10px; padding-left: 20px; }
-.prose li { margin-bottom: 5px; }
+.prose ul, .prose ol { margin: 6px 0 12px; padding-left: 22px; }
+.prose li { margin-bottom: 7px; padding-left: 2px; }
+.prose ol { list-style: decimal; }
+.prose ol li::marker { font-family: 'IBM Plex Mono', monospace; font-size: 14px;
+  color: #8C2F27; font-weight: 500; }
+.prose ul li::marker { color: #B8862B; }
+.prose strong { font-weight: 600; color: #241F1C; }
+.prose em { font-style: italic; }
 .prose code { font-family: 'IBM Plex Mono', monospace; font-size: 13.5px;
   background: #F3EDE4; padding: 1px 5px; border-radius: 4px; }
 .tag { display: inline-block; background: #F3EDE4; border-radius: 999px;
