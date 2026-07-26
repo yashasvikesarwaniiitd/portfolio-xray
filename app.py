@@ -198,6 +198,12 @@ html, body, [class*="css"], .stApp, button, input, textarea, select {
 .tag { display: inline-block; background: #F3EDE4; border-radius: 999px;
   padding: 5px 11px; font-size: 11.5px; color: #5C534B; margin: 2px 4px 2px 0;
   font-family: 'IBM Plex Mono', monospace; }
+.thinking { font-family: 'Space Grotesk', sans-serif; font-size: 13px; color: #948A80;
+  padding-top: 5px; }
+.thinking .dots i { font-style: normal; animation: blink 1.2s infinite; }
+.thinking .dots i:nth-child(2) { animation-delay: .2s; }
+.thinking .dots i:nth-child(3) { animation-delay: .4s; }
+@keyframes blink { 0%, 60%, 100% { opacity: .25 } 30% { opacity: 1 } }
 .refused { background: #F6EAE7; border-left: 3px solid #8C2F27; border-radius: 8px;
   padding: 10px 14px; font-size: 12.5px; color: #8C2F27; max-width: 820px;
   margin: -12px 0 24px 44px; }
@@ -287,6 +293,7 @@ ss.setdefault("source_label", None)
 ss.setdefault("csv_text", None)      # user's own portfolio, held in memory only
 ss.setdefault("chat", [])
 ss.setdefault("queued", None)
+ss.setdefault("pending", None)   # question awaiting an answer (already shown in the thread)
 ss.setdefault("report", None)
 ss.setdefault("rows", pd.DataFrame([
     {"Holding name": "", "Symbol / AMFI code": "", "Type": "Share", "Market": "India",
@@ -434,6 +441,28 @@ def page_ask() -> None:
                             f'<span style="font-size:11.5px;color:#948A80">Python tools '
                             f'used:</span> {tags}</div>', unsafe_allow_html=True)
 
+    # A pending question is ALREADY in the thread above (appended before the rerun), so the
+    # user sees what they asked while we fetch. The answer lands on the next rerun.
+    if ss.pending:
+        st.markdown('<div class="msg-a"><div class="av">X</div>'
+                    '<div class="thinking">Routing → Python tools → answer'
+                    '<span class="dots"><i>.</i><i>.</i><i>.</i></span></div></div>',
+                    unsafe_allow_html=True)
+        slot = st.empty()
+        # History excludes the pending question — the backend appends it itself.
+        history = [{"role": r, "content": t} for r, t, _ in ss.chat[:-1]]
+        with st.spinner("Working…"):
+            code, data = call_json("POST", "/chat", cold_slot=slot,
+                                   json={"message": ss.pending, "history": history})
+        slot.empty()
+        answer = data.get("answer", "The backend is unreachable — give the free tier "
+                                    "~30s and retry.")
+        ss.pending = None
+        ss.chat.append(("assistant", answer,
+                        {"refused": data.get("refused"),
+                         "tools": data.get("tools_used") or []}))
+        st.rerun()
+
     st.markdown('<div style="height:6px"></div>', unsafe_allow_html=True)
     chips = ["How concentrated am I?", "Do I own the same thing twice?",
              "Should I sell my worst fund?", "What is XIRR?"]
@@ -447,18 +476,10 @@ def page_ask() -> None:
     question = ss.queued or typed
     ss.queued = None
     if question:
-        history = [{"role": r, "content": t} for r, t, _ in ss.chat]
-        slot = st.empty()
-        with st.spinner("Routing → Python tools → answer…"):
-            code, data = call_json("POST", "/chat", cold_slot=slot,
-                                   json={"message": question, "history": history})
-        slot.empty()
-        answer = data.get("answer", "The backend is unreachable — give the free tier "
-                                    "~30s and retry.")
+        # Paint the question first, answer second: append + rerun so the user's own words
+        # are on screen while the tools run, instead of appearing with the answer.
         ss.chat.append(("user", question, {}))
-        ss.chat.append(("assistant", answer,
-                        {"refused": data.get("refused"),
-                         "tools": data.get("tools_used") or []}))
+        ss.pending = question
         st.rerun()
 
 

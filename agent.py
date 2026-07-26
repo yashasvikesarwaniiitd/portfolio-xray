@@ -31,7 +31,18 @@ REQUIRED_COLUMNS = ["Where", "symbol", "source", "Total Invested"]
 _MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
            "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
 
-_MF = Mftool()  # AMFI daily NAV feed client; construction does no network I/O
+_MF_CLIENT: Mftool | None = None
+
+
+def _mf() -> Mftool:
+    """AMFI daily NAV feed client, built on first use. Mftool()'s constructor DOES hit the
+    network (~7s), so constructing it at import made `import agent` fail without internet —
+    which broke test collection and made the 'hermetic' CI job quietly network-dependent."""
+    global _MF_CLIENT
+    if _MF_CLIENT is None:
+        _MF_CLIENT = Mftool()
+    return _MF_CLIENT
+
 
 SYSTEM = (
     "You are Portfolio X-Ray, a portfolio analytics assistant for Indian retail investors. "
@@ -453,7 +464,7 @@ def _price_map(source: str, symbol: str, start: date, end: date) -> dict:
         # drop NaNs so max(pmap) is a real trading day, not a NaN "latest price".
         return {idx.date(): float(v) for idx, v in hist["Close"].items() if pd.notna(v)}
     if source == "mftool":
-        raw = _MF.get_scheme_historical_nav(str(symbol))
+        raw = _mf().get_scheme_historical_nav(str(symbol))
         if not raw or not raw.get("data"):
             return {}
         out = {}
@@ -960,7 +971,7 @@ def search_fund(query: str, limit: int = 10) -> str:
     that's the usual ask."""
     global _SCHEME_CODES
     if _SCHEME_CODES is None:
-        _SCHEME_CODES = _MF.get_scheme_codes() or {}
+        _SCHEME_CODES = _mf().get_scheme_codes() or {}
     words = [w for w in str(query).lower().split() if w not in ("fund", "mutual", "the")]
     if not words:
         raise ValueError("Give me part of the fund's name to search for.")
@@ -978,7 +989,7 @@ def search_fund(query: str, limit: int = 10) -> str:
 
 def fetch_nav(fund_code: str) -> str:
     code = str(fund_code).strip()
-    quote = _MF.get_scheme_quote(code)  # returns None for an unknown code
+    quote = _mf().get_scheme_quote(code)  # returns None for an unknown code
     if not quote:
         raise ValueError(
             f"No NAV found for fund code '{code}'. Check the AMFI scheme code."
