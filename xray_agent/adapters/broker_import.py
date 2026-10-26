@@ -329,7 +329,7 @@ def to_holdings(txns: list) -> list:
     return holdings
 
 
-def read_broker_csv(path: str) -> tuple:
+def read_broker_csv(path: str, resolve_funds: bool = True) -> tuple:
     """(holdings, notes). Notes carry the column mapping and any skipped rows, so a user
     can see how their file was interpreted rather than having to trust it."""
     if not os.path.exists(path):
@@ -338,6 +338,18 @@ def read_broker_csv(path: str) -> tuple:
         text = f.read()
     txns, skipped, mapping, unmapped, stats = read_transactions(text)
     holdings = to_holdings(txns)
+
+    # A mutual fund statement identifies a scheme by NAME; every price lookup needs the
+    # AMFI code. This is the only network call in the import path, and it degrades to
+    # "unresolved" rather than failing the whole file.
+    fund_notes: list = []
+    if resolve_funds and any(not h["source"] for h in holdings):
+        try:
+            from .fund_resolver import resolve_holdings
+            fund_notes = resolve_holdings(holdings)
+        except Exception as e:
+            fund_notes = [f"fund-code resolution unavailable ({e}); "
+                          "those holdings will be reported as unpriceable"]
     notes = {
         "transactions": len(txns),
         "excluded_not_executed": stats["filtered_not_executed"],
@@ -346,6 +358,7 @@ def read_broker_csv(path: str) -> tuple:
         "column_mapping": mapping,
         "ignored_columns": unmapped,
         "skipped_rows": skipped,
+        "resolved_funds": fund_notes,
         "unresolved_instruments": [h["name"] for h in holdings if not h["source"]],
         "date_range": [min(t.date for t in txns).isoformat(),
                        max(t.date for t in txns).isoformat()],

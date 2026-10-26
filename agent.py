@@ -388,7 +388,10 @@ def _try_broker_statement(path: str, sip_failure: str) -> tuple:
     note = (f"read as a broker order statement: {notes['transactions']} transactions "
             f"across {notes['holdings']} holdings, "
             f"{notes['date_range'][0]} to {notes['date_range'][1]}")
-    extra = list(notes["skipped_rows"])
+    extra = list(notes["skipped_rows"]) + list(notes.get("resolved_funds") or [])
+    if notes.get("excluded_not_executed"):
+        extra.append(f"{notes['excluded_not_executed']} order(s) excluded as not executed "
+                     f"({', '.join(sorted(notes['order_statuses_seen']))})")
     if notes["unresolved_instruments"]:
         extra.append("could not resolve a price source for: "
                      + ", ".join(notes["unresolved_instruments"][:8]))

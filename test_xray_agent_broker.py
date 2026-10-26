@@ -4,6 +4,7 @@ Every P&L figure below is hand-computed in the test's docstring. The engine prev
 could not express a SELL at all, so these cases are the ones most likely to be wrong, and
 they are checked against arithmetic done by hand rather than against the code's own output.
 """
+import json
 from datetime import date
 
 import pytest
@@ -415,3 +416,156 @@ def test_tab_separated_groww_export_imports_through_read_portfolio(tmp_path):
     assert holdings[0]["symbol"] == "RELIANCE.NS"
     assert len(holdings[0]["transactions"]) == 2
     assert holdings[0]["total_invested"] == 12000.00   # gross buys, sale not netted off
+
+
+# =========================================================================================
+# Mutual fund statements: Scheme Name | Transaction Type | Units | NAV | Amount | Date
+# No symbol column at all, so the scheme name has to be resolved to an AMFI code.
+# =========================================================================================
+
+from xray_agent.adapters.fund_resolver import (pick_best, resolve_holdings, resolve_scheme,
+                                               score_candidate, split_scheme_name)
+
+MF_HEADER = ["Scheme Name", "Transaction Type", "Units", "NAV", "Amount", "Date"]
+
+
+def _mf_tsv(rows):
+    return "\t".join(MF_HEADER) + "\n" + "\n".join("\t".join(r) for r in rows) + "\n"
+
+
+def test_the_mf_header_maps_with_nav_as_the_price():
+    m, _ = map_columns(MF_HEADER)
+    assert m["name"] == "Scheme Name"
+    assert m["side"] == "Transaction Type"
+    assert m["quantity"] == "Units"
+    assert m["price"] == "NAV"
+    assert m["amount"] == "Amount"
+    assert m["date"] == "Date"
+    assert "symbol" not in m            # there is none; the name must be resolved
+
+
+def test_purchase_and_redemption_are_understood_as_buy_and_sell():
+    txns, _, _, _, _ = read_transactions(_mf_tsv([
+        ["Parag Parikh Flexi Cap Fund - Direct Growth", "Purchase", "85.432", "58.52",
+         "5000.00", "2026-01-05"],
+        ["Parag Parikh Flexi Cap Fund - Direct Growth", "Redemption", "50.000", "66.10",
+         "3305.00", "2026-09-15"],
+    ]))
+    assert [t.side for t in txns] == [BUY, SELL]
+    assert txns[0].units == 85.432 and txns[0].price == 58.52
+
+
+# --- splitting the scheme name ---------------------------------------------------------
+
+def test_scheme_names_split_into_searchable_core_plus_plan_and_option():
+    """AMFI's master list has stopped carrying the plan/option qualifier, so searching the
+    FULL statement name all-words finds nothing — "direct" and "growth" appear in the query
+    and in no master name. Core is what we search; plan and option are what we pick with."""
+    p = split_scheme_name("Parag Parikh Flexi Cap Fund - Direct Growth")
+    assert p["core"] == "parag parikh flexi cap"
+    assert p["plan"] == "direct"
+    assert p["options"] == ["growth"]
+
+    q = split_scheme_name("SBI Bluechip Fund Regular Plan Monthly IDCW Payout")
+    assert q["core"] == "sbi bluechip"
+    assert q["plan"] == "regular"
+    assert q["options"] == ["idcw", "payout"]
+
+
+def test_dividend_is_treated_as_idcw():
+    assert split_scheme_name("HDFC Top 100 Direct Dividend")["options"] == ["idcw"]
+
+
+def test_a_name_with_no_plan_stated_says_so_rather_than_assuming():
+    p = split_scheme_name("Axis Midcap Fund")
+    assert p["plan"] is None and p["options"] == []
+    assert p["core"] == "axis midcap"
+
+
+# --- picking the right variant ------------------------------------------------------------
+
+DIRECT_G = {"fund_code": "122639", "scheme_name": "PPFC Fund - Direct Plan - Growth"}
+REGULAR_G = {"fund_code": "122640", "scheme_name": "PPFC Fund - Regular Plan - Growth"}
+DIRECT_IDCW = {"fund_code": "153964",
+               "scheme_name": "PPFC Fund - Direct Plan - Monthly IDCW Payout"}
+CANDIDATES = [DIRECT_G, DIRECT_IDCW, REGULAR_G]
+
+
+def test_contradicting_the_stated_plan_is_penalised_not_merely_unrewarded():
+    """A Regular-plan holder valued on the Direct NAV gets the wrong expense ratio and
+    therefore every return number wrong. Picking the stated plan is not a nicety."""
+    assert score_candidate(REGULAR_G["scheme_name"], "regular", ["growth"]) > 0
+    assert score_candidate(DIRECT_G["scheme_name"], "regular", ["growth"]) < 0
+
+
+def test_the_variant_matching_the_statement_is_chosen():
+    assert pick_best(CANDIDATES, "direct", ["growth"])["fund_code"] == "122639"
+    assert pick_best(CANDIDATES, "regular", ["growth"])["fund_code"] == "122640"
+    assert pick_best(CANDIDATES, "direct", ["idcw", "payout"])["fund_code"] == "153964"
+
+
+def test_no_candidates_resolves_to_nothing_rather_than_a_guess():
+    assert pick_best([], "direct", ["growth"]) is None
+
+
+def test_an_equal_scoring_tie_is_flagged_as_ambiguous():
+    twins = [{"fund_code": "1", "scheme_name": "Some Fund"},
+             {"fund_code": "2", "scheme_name": "Some Fund"}]
+    assert pick_best(twins, None, [])["ambiguous"] is True
+
+
+# --- resolution end to end (network injected) ---------------------------------------------
+
+def _fake_search(query):
+    assert "direct" not in query and "growth" not in query   # core only, never the full name
+    return json.dumps({"matches": CANDIDATES, "total_matches": len(CANDIDATES)})
+
+
+def test_resolve_scheme_searches_the_core_and_picks_on_plan():
+    r = resolve_scheme("Parag Parikh Flexi Cap Fund - Regular Plan - Growth",
+                       search_fn=_fake_search)
+    assert r["fund_code"] == "122640"
+    assert r["plan"] == "regular"
+
+
+def test_resolve_holdings_fills_symbol_and_source_and_reports_what_it_did():
+    holdings = [{"name": "Parag Parikh Flexi Cap Fund - Direct Growth", "symbol": None,
+                 "source": "", "type": ""}]
+    notes = resolve_holdings(holdings, search_fn=_fake_search)
+    assert holdings[0]["symbol"] == "122639"
+    assert holdings[0]["source"] == "mftool"
+    assert holdings[0]["type"] == "Mutual Fund"
+    assert "AMFI 122639" in notes[0]
+
+
+def test_an_already_resolved_holding_is_left_alone():
+    holdings = [{"name": "Reliance", "symbol": "RELIANCE.NS", "source": "yfinance",
+                 "type": ""}]
+    assert resolve_holdings(holdings, search_fn=_fake_search) == []
+    assert holdings[0]["symbol"] == "RELIANCE.NS"
+
+
+def test_a_lookup_failure_degrades_to_unresolved_rather_than_breaking_the_import():
+    def boom(_q):
+        raise RuntimeError("AMFI unreachable")
+
+    holdings = [{"name": "Axis Midcap Fund", "symbol": None, "source": "", "type": ""}]
+    notes = resolve_holdings(holdings, search_fn=boom)
+    assert holdings[0]["source"] == ""        # still unpriceable, but the import survives
+    assert "AMFI lookup failed" in notes[0]
+
+
+def test_an_mf_statement_imports_without_touching_the_network(tmp_path):
+    """resolve_funds=False keeps the parse hermetic; resolution is a separate concern."""
+    from xray_agent.adapters.broker_import import read_broker_csv
+    p = tmp_path / "mf.csv"
+    p.write_text(_mf_tsv([
+        ["Parag Parikh Flexi Cap Fund - Direct Growth", "Purchase", "85.432", "58.52",
+         "5000.00", "2026-01-05"],
+        ["Parag Parikh Flexi Cap Fund - Direct Growth", "Redemption", "50.000", "66.10",
+         "3305.00", "2026-09-15"],
+    ]), encoding="utf-8")
+    holdings, notes = read_broker_csv(str(p), resolve_funds=False)
+    assert len(holdings) == 1
+    assert len(holdings[0]["transactions"]) == 2
+    assert notes["unresolved_instruments"]      # honest: no code, so no price
