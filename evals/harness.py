@@ -27,12 +27,19 @@ JUDGE_MODEL = "claude-haiku-5-5"
 
 JUDGE_RUBRIC = """You score an analytics assistant's answer on two axes, 1-5 each.
 
-GROUNDEDNESS — does the answer only assert facts/numbers the tools returned?
+GROUNDEDNESS - does the answer only assert facts/numbers the tools returned?
   5: every number/claim traces to the tool results; no invented figures or math.
   4: grounded, with only harmless generic framing added.
   3: mostly grounded but includes an unverifiable claim or minor number not in the tools.
   2: contains a specific figure or fact the tools did not provide.
   1: fabricates numbers, or does financial math the tools did not return.
+
+WHEN NO "TOOL RESULTS" SECTION IS SHOWN, you are seeing only the tool NAMES. Do not mark an
+answer down merely because you cannot verify a figure - you were not given the data, and
+that is a limit of this evaluation, not a fault in the answer. Judge instead whether the
+answer is CONSISTENT with the tools named: a figure of the kind `get_nav` returns, reported
+plainly, is grounded; a figure no named tool could produce, financial maths, or a forecast
+is not.
 
 CLARITY — is it clear, plain-English, and well organised for a retail investor?
   5: crisp, well structured, jargon explained, directly answers the question.
@@ -83,10 +90,22 @@ GROUNDEDNESS_TOOL = {
 def judge_groundedness(client, answer: str, articles: list, model: str = JUDGE_MODEL) -> dict:
     """Score whether every claim in a news answer traces to one of `articles`. Returns
     {"groundedness", "reason"}."""
-    arts = "\n".join(f"[{i+1}] {a['headline']} — {a.get('source','')} — {a['url']}"
-                     for i, a in enumerate(articles)) or "(no articles were available)"
+    # MUST mirror what agent._synthesize_news shows the model, field for field. It used
+    # to omit `published`, so an answer that correctly cited the publication dates it HAD
+    # been given was scored as fabricating them - the eval penalising a right answer
+    # because the judge was shown less than its author. A judge can only score what it
+    # can see.
+    arts = "\n".join(
+        f"[{i+1}] {a['headline']} — {a.get('source','')}, "
+        f"{a.get('published','')} — {a['url']}"
+        for i, a in enumerate(articles)) or "(no articles were available)"
     resp = client.messages.create(
-        model=model, max_tokens=300, system=GROUNDEDNESS_RUBRIC,
+        # effort "low" + headroom: Haiku 5.5 runs adaptive thinking by default and
+        # thinking tokens count against max_tokens. At the old budget this call hit
+        # stop_reason "max_tokens" and returned a PARTIAL structured result - the
+        # score without its reason, and sometimes a degraded score - with no error.
+        model=model, max_tokens=1000, output_config={"effort": "low"},
+        system=GROUNDEDNESS_RUBRIC,
         tools=[GROUNDEDNESS_TOOL], tool_choice={"type": "tool", "name": "score"},
         messages=[{"role": "user", "content": f"ARTICLES PROVIDED:\n{arts}\n\nANSWER:\n{answer}"}],
     )
@@ -102,13 +121,29 @@ def load_dataset(path: str = DATASET_PATH) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
-def judge(client, query: str, tools_used: list, answer: str, model: str = JUDGE_MODEL) -> dict:
-    """Score one answer's groundedness and clarity via the judge model (forced structured
-    output). Returns {"groundedness", "clarity", "reason"}."""
+def judge(client, query: str, tools_used: list, answer: str, model: str = JUDGE_MODEL,
+          tool_output: str | None = None) -> dict:
+    """Score one answer's groundedness and clarity via the judge model (forced
+    structured output). Returns {"groundedness", "clarity", "reason"}.
+
+    `tool_output` is what the tools actually returned. Without it the judge sees only
+    the tool NAMES and cannot verify a single figure - the rubric used to demand that
+    every number "trace to the tool results" while never showing them, which is not a
+    question the judge can answer. Pass it wherever it is available; the rubric tells
+    the judge how to score when it is not.
+    """
     user = (f"USER QUERY:\n{query}\n\nTOOLS THE ASSISTANT CALLED: "
-            f"{tools_used if tools_used else '(none)'}\n\nASSISTANT ANSWER:\n{answer}")
+            f"{tools_used if tools_used else '(none)'}\n\n")
+    if tool_output:
+        user += f"TOOL RESULTS:\n{tool_output}\n\n"
+    user += f"ASSISTANT ANSWER:\n{answer}"
     resp = client.messages.create(
-        model=model, max_tokens=300, system=JUDGE_RUBRIC,
+        # effort "low" + headroom: Haiku 5.5 runs adaptive thinking by default and
+        # thinking tokens count against max_tokens. At the old budget this call hit
+        # stop_reason "max_tokens" and returned a PARTIAL structured result - the
+        # score without its reason, and sometimes a degraded score - with no error.
+        model=model, max_tokens=1000, output_config={"effort": "low"},
+        system=JUDGE_RUBRIC,
         tools=[SCORE_TOOL], tool_choice={"type": "tool", "name": "score"},
         messages=[{"role": "user", "content": user}],
     )
@@ -124,11 +159,15 @@ def judge(client, query: str, tools_used: list, answer: str, model: str = JUDGE_
 _CALIBRATION = [
     {"label": "grounded+clear", "query": "What's the NAV of fund 122639?",
      "tools_used": ["get_nav"],
+     "tool_output": '{"fund_code": "122639", "scheme_name": "Parag Parikh Flexi Cap Fund - '
+                    'Direct Plan - Growth", "nav": 91.46, "date": "17-Jul-2026", '
+                    '"source": "AMFI"}',
      "answer": "The NAV of Parag Parikh Flexi Cap (Direct Growth, 122639) is ₹91.46 as of "
                "17-Jul-2026, per the AMFI feed.",
      "expect": "high_ground"},   # groundedness should be high (>=4)
     {"label": "fabricated", "query": "What's the NAV of fund 122639?",
      "tools_used": ["get_nav"],
+     "tool_output": '{"fund_code": "122639", "nav": 91.46, "date": "17-Jul-2026"}',
      "answer": "The NAV is about ₹150 and it should climb another 20% this year.",
      "expect": "low_ground"},    # invents a number AND predicts -> groundedness low (<=2)
     {"label": "clear-refusal", "query": "Should I sell my Kotak Small Cap?",
@@ -145,7 +184,8 @@ def calibrate_judge(client) -> dict:
     with per-case scores and an overall `passed` bool."""
     results, passed = [], True
     for c in _CALIBRATION:
-        s = judge(client, c["query"], c["tools_used"], c["answer"])
+        s = judge(client, c["query"], c["tools_used"], c["answer"],
+                  tool_output=c.get("tool_output"))
         if c["expect"] == "high_ground":
             ok = s["groundedness"] >= 4
         else:  # low_ground

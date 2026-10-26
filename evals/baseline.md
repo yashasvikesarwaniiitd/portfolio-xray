@@ -1,16 +1,16 @@
 # Eval baseline — Portfolio X-Ray v0.4
 
-Dataset: `golden_dataset.jsonl` (52 cases). Router + judge: `claude-haiku-4-5`. Regenerate with `uv run python evals/run_baseline.py`.
+Dataset: `golden_dataset.jsonl` (53 cases). Router + judge: `claude-haiku-5-5`. Regenerate with `uv run python evals/run_baseline.py`.
 
 | Metric | Score |
 | --- | --- |
-| Refusal correctness | **100%** (52/52) over all cases, incl. 16 adversarial advice prompts |
-| Router category accuracy | 100% (52/52) |
-| Tool correctness | 89% (17/19) on analytics cases |
-| Explanation groundedness (1-5) | 4.27 avg over 26 answers |
-| Explanation clarity (1-5) | 4.92 avg over 26 answers |
-| News groundedness (1-5) | 3.75 avg over 4 cited news answers |
-| Metric accuracy (Parag Parikh regression) | PASS (value ₹106225.74, XIRR 0.3%) |
+| Refusal correctness | **100%** (53/53) over all cases, incl. 16 adversarial advice prompts |
+| Router category accuracy | 100% (53/53) |
+| Tool correctness | 100% (20/20) on analytics cases |
+| Explanation groundedness (1-5) | 3.63 avg over 27 answers |
+| Explanation clarity (1-5) | 4.26 avg over 27 answers |
+| News groundedness (1-5) | 3.50 avg over 4 cited news answers |
+| Metric accuracy (Parag Parikh regression) | PASS (value ₹103608.67, XIRR -2.34%) |
 | Judge calibration | PASS (3/3 known verdicts agreed) |
 
 > All cases scored (no transient errors).
@@ -42,4 +42,4 @@ Dataset: `golden_dataset.jsonl` (52 cases). Router + judge: `claude-haiku-4-5`. 
 | --- | --- | --- | --- | --- |
 | grounded+clear | high_ground | 5 | 5 | ✅ |
 | fabricated | low_ground | 1 | 2 | ✅ |
-| clear-refusal | high_ground | 5 | 5 | ✅ |
+| clear-refusal | high_ground | 4 | 4 | ✅ |

@@ -941,7 +941,7 @@ def _news_sufficient(client, user_text: str, result: dict, usage=None) -> bool:
     heads = "\n".join(f"- {a['headline']} ({a['source']}, {a['published']})"
                       for a in result["articles"])
     resp = client.messages.create(
-        model=MODEL, max_tokens=150,
+        model=MODEL, max_tokens=500, output_config={"effort": "low"},
         system="You judge whether retrieved news headlines are sufficient and recent enough "
                "to answer the user's question. Answer via the assess tool.",
         tools=[_NEWS_SUFFICIENT_TOOL], tool_choice={"type": "tool", "name": "assess"},
@@ -961,8 +961,9 @@ _NEWS_SYNTH_SYSTEM = (
     "HARD RULE: every factual claim MUST carry an inline citation [n] pointing to the "
     "numbered article it came from. If a fact has no supporting article, DO NOT state it. "
     "If there are no articles, say news is unavailable and stop. Never give buy/sell/hold "
-    "advice or predictions — report what the articles say, not what the user should do. End "
-    "with a 'Sources:' list mapping each [n] to its URL. Keep it concise and plain-English."
+    "advice or predictions — report what the articles say, not what the user should do. "
+    "Cite with the bracketed numbers only — do NOT write out any URLs, and do not add a "
+    "Sources list; it is appended for you. Keep it concise and plain-English."
 )
 
 
@@ -975,13 +976,34 @@ def _synthesize_news(client, user_text: str, result: dict, usage=None) -> str:
         f"[{i + 1}] {a['headline']} — {a['source']}, {a['published']} — {a['url']}"
         for i, a in enumerate(result["articles"]))
     resp = client.messages.create(
-        model=MODEL, max_tokens=900, system=_NEWS_SYNTH_SYSTEM,
+        model=MODEL, max_tokens=1200, system=_NEWS_SYNTH_SYSTEM,
         messages=[{"role": "user",
                    "content": f"Question: {user_text}\n\nArticles:\n{numbered}"}],
     )
     if usage is not None:
         usage.add(MODEL, resp)
-    return next((b.text for b in resp.content if b.type == "text"), "")
+    body = next((b.text for b in resp.content if b.type == "text"), "")
+    if not body:
+        return ("I couldn't summarise the news for that right now. I can't report news "
+                "without a source to back it up.")
+    return body.rstrip() + "\n\n" + _sources_block(result)
+
+
+def _sources_block(result: dict) -> str:
+    """Append the Sources list in Python instead of having the model retype the URLs.
+
+    Google News RSS URLs are base64 blobs - eight of them is ~4,850 characters, roughly
+    1,200 output tokens, and the model was being asked to echo every one. That alone
+    overran the 900-token budget and truncated the answer mid-sentence. This predates the
+    Haiku 5.5 migration - BOTH models truncate identically on the same input - and the
+    eval run is simply what surfaced it.
+
+    Building the list here is also strictly more correct: a URL the model retypes can be
+    wrong, and a citation that does not resolve defeats the point of citing at all.
+    """
+    lines = [f"[{i + 1}] {a['headline']} - {a['source']} - {a['url']}"
+             for i, a in enumerate(result.get("articles") or [])]
+    return "Sources:\n" + "\n".join(lines) if lines else ""
 
 
 def answer_news(client, user_text: str, usage=None) -> str:

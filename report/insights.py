@@ -82,7 +82,8 @@ def _fallback(section_name: str, section_json: dict) -> list[str]:
 
 def _call(client, system: str, payload: str, usage) -> list[str] | None:
     resp = client.messages.create(
-        model=MODEL, max_tokens=600, system=system,
+        model=MODEL, max_tokens=1200, output_config={"effort": "low"},
+        system=system,
         tools=[INSIGHT_TOOL], tool_choice={"type": "tool", "name": "insight"},
         messages=[{"role": "user", "content": payload}],
     )

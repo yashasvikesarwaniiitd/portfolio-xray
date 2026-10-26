@@ -58,7 +58,11 @@ def classify(client, query: str, model: str = ROUTER_MODEL, usage=None) -> dict:
     If a logger.Usage is passed, the classifier call's token usage is recorded on it."""
     try:
         resp = client.messages.create(
-            model=model, max_tokens=200, system=ROUTER_SYSTEM,
+            # Classification needs no deep reasoning, and Haiku 5.5's adaptive
+            # thinking would otherwise eat a 200-token budget shared with a forced
+            # tool call.
+            model=model, max_tokens=400, output_config={"effort": "low"},
+            system=ROUTER_SYSTEM,
             tools=[CLASSIFY_TOOL], tool_choice={"type": "tool", "name": "classify"},
             messages=[{"role": "user", "content": query}],
         )
