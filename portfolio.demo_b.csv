@@ -1,0 +1,6 @@
+Mode,App,Type,Market,Risk,Where,symbol,source,Estimated Returns (3Y),Total Invested,Jan'26,Feb'26,Mar'26,Apr'26,May'26,Jun'26,Jul'26,Aug'26,Sep'26
+Equity,Groww,Share,India,Med,HDFC Bank,HDFCBANK.NS,yfinance,-,90000,10000,10000,10000,10000,10000,10000,10000,10000,10000
+Equity,Groww,Share,India,High,Tata Motors,TATAMOTORS.NS,yfinance,-,27000,3000,3000,3000,3000,3000,3000,3000,3000,3000
+Equity,Groww,Share,India,Med,TCS,TCS.NS,yfinance,-,18000,2000,2000,2000,2000,2000,2000,2000,2000,2000
+Equity,Zerodha,Mutual Fund,India,Med,Parag Parikh Flexi Cap,122639,mftool,-,45000,5000,5000,5000,5000,5000,5000,5000,5000,5000
+Equity,Zerodha,ETF,India,Med,Nippon Nifty BeES,NIFTYBEES.NS,yfinance,-,9000,1000,1000,1000,1000,1000,1000,1000,1000,1000

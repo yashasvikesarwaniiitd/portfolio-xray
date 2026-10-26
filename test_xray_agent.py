@@ -249,3 +249,18 @@ def test_rounding_is_allowed_but_invention_is_not():
     assert not policies.numbers_are_honest("down 12460", {"change": -12450.5})
     # Sign is forgiven: "fell 12450.5" describes a change of -12450.5.
     assert policies.numbers_are_honest("fell 12450.5", {"change": -12450.5})
+
+
+def test_index_names_are_not_read_as_claimed_numbers():
+    """Regression: "beta of 1.34 against the NIFTY 50" states ONE number. A naive scan read
+    the 50 as an unsourced figure and rejected the finding, which then burned budget on a
+    repair that could never succeed. Index and product names are stripped before scanning;
+    every other numeral in the sentence is still checked."""
+    ev = {"symbol": "HDFCBANK.NS", "beta": 1.34}
+    assert policies.numbers_are_honest("Beta is 1.34 against the NIFTY 50.", ev)
+    assert policies.numbers_are_honest("Beta is 1.34 versus the S&P 500.", ev)
+    assert policies.numbers_are_honest("Overlap is on a top-10 basis.", {"x": 1})
+    assert policies.numbers_are_honest("Sharpe uses the 10Y G-Sec yield.", {"x": 1})
+    # The carve-out is narrow: a real unsourced figure beside an index name still fails.
+    assert not policies.numbers_are_honest("Beta is 1.34 against the NIFTY 50, down 7.2%.", ev)
+    assert policies.claimed_numbers("Beta 1.34 vs NIFTY 50") == ["1.34"]

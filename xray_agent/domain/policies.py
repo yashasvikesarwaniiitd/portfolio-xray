@@ -28,6 +28,27 @@ _SAFE_CONTEXT = re.compile(
 
 _NUM = re.compile(r"-?\d+(?:\.\d+)?")
 
+# Numerals that are part of a NAME, not a claim about the portfolio. "The NIFTY 50 fell"
+# states one number, not two, but a naive scan reads the 50 as an unsourced figure and
+# rejects a perfectly good finding — which then burns budget on a repair that cannot
+# succeed, because 50 was never a claim to begin with. Same idea as _SAFE_CONTEXT above:
+# a narrow, deterministic carve-out for known proper nouns. Any OTHER numeral in the same
+# sentence is still checked, so this does not weaken the guarantee.
+_ENTITY_NUMERALS = re.compile(
+    r"\b(?:"
+    r"nifty\s*(?:50|100|200|500|next\s*50|midcap\s*\d+|smallcap\s*\d+|bank)"
+    r"|sensex(?:\s*30)?"
+    r"|s\s*&\s*p\s*(?:500|bse\s*\d+)?"
+    r"|bse\s*(?:100|200|500)"
+    r"|nasdaq\s*(?:100|composite)?"
+    r"|dow\s*(?:jones|30)"
+    r"|russell\s*\d+"
+    r"|top[-\s]*10"
+    r"|\d+\s*y(?:ear)?\s*g-?sec"
+    r"|covid[-\s]*19"
+    r")\b",
+    re.IGNORECASE)
+
 
 def violates_guardrail(text: str) -> bool:
     """True if the text contains a transactional imperative aimed at the user."""
@@ -66,23 +87,26 @@ def _matches_pool(stated: float, decimals: int, pool) -> bool:
                for j in pool)
 
 
+def claimed_numbers(text: str) -> list[str]:
+    """The numerals in `text` that are actually claims, with index and product names
+    (NIFTY 50, S&P 500, top-10) removed first so their digits are not mistaken for figures."""
+    return [m.group() for m in _NUM.finditer(_ENTITY_NUMERALS.sub(" ", text or ""))]
+
+
 def numbers_are_honest(text: str, *json_objs) -> bool:
     """Every numeral in `text` must appear in one of the JSON objects, allowing rounding:
     a stated number matches a JSON number that rounds to it at the stated precision."""
     pool = set()
     for o in json_objs:
         pool |= json_numbers(o)
-    for m in _NUM.finditer(text):
-        if not _matches_pool(float(m.group()), _decimals(m.group()), pool):
-            return False
-    return True
+    return not unsupported_numbers(text, pool)
 
 
 def unsupported_numbers(text: str, pool) -> list[str]:
     """Which numerals in `text` are NOT backed by `pool`. Powers an actionable rejection
     message, so the model is told exactly which figure to drop rather than just 'no'."""
-    return [m.group() for m in _NUM.finditer(text)
-            if not _matches_pool(float(m.group()), _decimals(m.group()), pool)]
+    return [n for n in claimed_numbers(text)
+            if not _matches_pool(float(n), _decimals(n), pool)]
 
 
 def verify_finding(finding, ledger) -> tuple[bool, str | None]:
