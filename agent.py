@@ -13,6 +13,7 @@ from mftool import Mftool
 
 import logger
 import metrics
+from xray_agent.domain import transactions as txn
 import news
 import refusals
 import router
@@ -368,6 +369,32 @@ def parse_month_label(label: str) -> tuple[int, int]:
     return 2000 + int(yy.strip()), _MONTHS[key]
 
 
+def _try_broker_statement(path: str, sip_failure: str) -> tuple:
+    """Last resort before failing: read `path` as a broker order statement.
+
+    Reached from BOTH ways the SIP parser can reject a file — pandas refusing it (banner
+    lines make it non-rectangular) and the required columns being absent. Only the second
+    was handled at first, so a real Groww export with an account banner failed before the
+    fallback was ever consulted. Found by running an actual export end to end rather than
+    by feeding the parser a tidy string.
+    """
+    try:
+        from xray_agent.adapters.broker_import import read_broker_csv
+        holdings, notes = read_broker_csv(path)
+    except Exception as broker_error:
+        raise ValueError(
+            f"{sip_failure} It also could not be read as a broker order statement "
+            f"({broker_error}).")
+    note = (f"read as a broker order statement: {notes['transactions']} transactions "
+            f"across {notes['holdings']} holdings, "
+            f"{notes['date_range'][0]} to {notes['date_range'][1]}")
+    extra = list(notes["skipped_rows"])
+    if notes["unresolved_instruments"]:
+        extra.append("could not resolve a price source for: "
+                     + ", ".join(notes["unresolved_instruments"][:8]))
+    return holdings, [note] + extra
+
+
 def read_portfolio(path: str = DEFAULT_PORTFOLIO) -> tuple[list[dict], list[str]]:
     """Parse the portfolio CSV into holdings. Returns (holdings, skipped_row_notes).
 
@@ -382,14 +409,18 @@ def read_portfolio(path: str = DEFAULT_PORTFOLIO) -> tuple[list[dict], list[str]
     try:
         df = pd.read_csv(path)
     except Exception as e:
-        raise ValueError(f"Could not read '{path}' as CSV: {e}")
+        # A broker statement often carries banner lines above the header, so it is not a
+        # rectangular CSV and pandas rejects it outright. That is a SIGNAL to try the
+        # statement importer, not a reason to give up — the importer finds its own header.
+        return _try_broker_statement(path, f"Could not read '{path}' as CSV: {e}")
     # Header may carry a BOM, embedded newlines, or doubled spaces — normalise whitespace.
     df.columns = [" ".join(str(c).replace("﻿", "").split()) for c in df.columns]
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
-        raise ValueError(
-            f"Portfolio file is missing required column(s): {', '.join(missing)}."
-        )
+        return _try_broker_statement(
+            path,
+            f"Portfolio file is missing required column(s): {', '.join(missing)}.")
+
     month_cols = [c for c in df.columns if "'" in c]  # monthly SIP-inflow columns
     holdings, skipped = [], []
     for i, row in df.iterrows():
@@ -481,6 +512,94 @@ def _price_map(source: str, symbol: str, start: date, end: date) -> dict:
     return {}
 
 
+def _value_from_transactions(h: dict, include_breakdown: bool = False,
+                             capture: dict | None = None) -> dict:
+    """Value a holding from a real broker statement rather than by reconstruction.
+
+    When we have the trade date, the quantity and the executed price, inferring units from
+    a monthly amount is strictly worse information. This path also understands SELLS, which
+    the SIP-sheet format could not express at all: realised P&L is FIFO-matched and
+    reported separately from unrealised.
+
+    `capture` still receives {price_map, priced_flows}, with sells carried as negative
+    amounts, so attribute_move and the portfolio timeline work unchanged.
+    """
+    base = {"name": h["name"], "symbol": h["symbol"], "source": h["source"] or "(blank)",
+            "type": h["type"], "market": h["market"], "risk": h["risk"]}
+    trades = h["transactions"]
+    if h["source"] in ("", "manual") or not h["symbol"]:
+        return {**base, "status": "unavailable", "invested": round(h["total_invested"], 2),
+                "reason": "no live-price source for this instrument (could not resolve the "
+                          "symbol from the statement)"}
+    try:
+        start = min(t.date for t in trades) - timedelta(days=15)
+        pmap = _price_map(h["source"], h["symbol"], start, date.today())
+        if not pmap:
+            return {**base, "status": "unavailable",
+                    "invested": round(h["total_invested"], 2),
+                    "reason": "no price data for this period (possibly delisted or newly "
+                              "listed)"}
+        price_date = max(pmap)
+        latest = pmap[price_date]
+        flows = txn.to_priced_flows(trades)
+        if capture is not None:
+            capture["price_map"] = pmap
+            capture["priced_flows"] = flows
+
+        summary = txn.summarise(trades, price_date, latest)
+        held = summary["units"]
+        if abs(held) <= 1e-9:
+            # Fully exited: there is no position to value, but the realised result is real
+            # and must not be silently dropped just because the holding is closed.
+            return {**base, "status": "closed", "units": 0.0,
+                    "invested": summary["gross_invested"],
+                    "realised_pnl": summary["realised_pnl"],
+                    "pnl_abs": summary["realised_pnl"],
+                    "price_date": str(price_date),
+                    "first_trade": summary["first_trade"],
+                    "last_trade": summary["last_trade"],
+                    "note": "position fully exited; P&L shown is realised"}
+
+        invested = summary["open_cost"]
+        row = {**base, "status": "priced",
+               "units": round(held, 4),
+               "invested": round(invested, 2),
+               "current_value": summary["current_value"],
+               "current_price": summary["current_price"],
+               "price_date": str(price_date),
+               "pnl_abs": summary["unrealised_pnl"],
+               "pnl_pct": round(summary["unrealised_pnl"] / invested * 100, 2)
+                          if invested else 0.0,
+               "realised_pnl": summary["realised_pnl"],
+               "total_pnl": summary["total_pnl"],
+               "average_cost": summary.get("average_cost"),
+               "gross_invested": summary["gross_invested"],
+               "gross_sold": summary["gross_sold"],
+               "trade_count": summary["trade_count"],
+               "buy_count": summary["buy_count"],
+               "sell_count": summary["sell_count"],
+               "first_trade": summary["first_trade"],
+               "basis": "broker statement (actual trade dates and executed prices)"}
+        try:
+            row["xirr_pct"] = round(
+                metrics.xirr(txn.cashflows_for_xirr(trades, price_date, latest)) * 100, 2)
+        except ValueError as e:
+            row["xirr_pct"] = None
+            row["xirr_note"] = str(e)
+        if summary.get("unmatched_units"):
+            row["unmatched_units"] = summary["unmatched_units"]
+            row["unmatched_note"] = summary["unmatched_note"]
+        if include_breakdown:
+            row["breakdown"] = [
+                {"date": t.date.isoformat(), "side": t.side, "units": round(t.units, 4),
+                 "price": round(t.price, 4), "value": round(t.value, 2)}
+                for t in txn.sort_txns(trades)]
+        return row
+    except Exception as e:
+        return {**base, "status": "unavailable", "invested": round(h["total_invested"], 2),
+                "reason": f"valuation from statement failed: {e}"}
+
+
 def reconstruct_holding(h: dict, include_breakdown: bool = False,
                         capture: dict | None = None) -> dict:
     """Value one holding by EXACT unit reconstruction, routing by source. SIPs are dated to
@@ -490,6 +609,10 @@ def reconstruct_holding(h: dict, include_breakdown: bool = False,
     the per-SIP price/units detail (used by the holding_units tool, omitted from snapshots).
     Pass `capture` to receive this holding's fetched {date: price} map and priced flows —
     lets a caller build a historical value series without refetching prices."""
+    # A broker statement gives real trade dates, quantities and executed prices, so when
+    # one is present we read the position instead of inferring it from monthly amounts.
+    if h.get("transactions"):
+        return _value_from_transactions(h, include_breakdown, capture)
     base = {
         "name": h["name"], "symbol": h["symbol"], "source": h["source"] or "(blank)",
         "type": h["type"], "market": h["market"], "risk": h["risk"],

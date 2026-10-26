@@ -1,0 +1,297 @@
+"""Import a broker order/transaction statement (Groww and friends) into holdings.
+
+Broker exports are not a standard. The same broker renames columns between export
+versions, and every broker spells the same six ideas differently. So this does not hardcode
+one layout: it normalises the header row and matches each column against a synonym set.
+When it cannot find something it needs, it says WHICH columns it saw and WHICH field it
+could not fill, because "could not parse your file" is a useless error for a user holding
+a file they did not design.
+
+Six fields are needed, and two of them can be derived:
+
+    date      required
+    symbol    required (or a name we can label the holding with)
+    side      required, unless quantity is signed
+    quantity  required
+    price     derivable from amount / quantity
+    amount    derivable from quantity * price
+
+Everything degrades rather than raises. A row that cannot be understood is reported in
+`skipped` with its line number and reason; the rest of the file still imports. One bad row
+in a thousand-row statement must not cost the user their whole import.
+"""
+from __future__ import annotations
+
+import csv
+import io
+import os
+import re
+from datetime import date, datetime
+
+from ..domain.transactions import BUY, SELL, Transaction
+
+# Column synonyms, matched against the normalised header (lowercased, punctuation stripped,
+# whitespace collapsed). Order within a list is preference order.
+FIELD_SYNONYMS = {
+    "date": ["trade date", "transaction date", "order date", "execution date", "exec date",
+             "date time", "datetime", "date", "txn date", "settlement date", "value date"],
+    "symbol": ["symbol", "scrip", "scrip code", "ticker", "instrument", "stock symbol",
+               "tradingsymbol", "trading symbol", "nse symbol", "bse code", "isin"],
+    "name": ["stock name", "company name", "scheme name", "security name", "instrument name",
+             "scrip name", "fund name", "name", "particulars", "description"],
+    "side": ["transaction type", "trade type", "order type", "buy sell", "buy or sell",
+             "type", "side", "b s", "action", "txn type"],
+    "quantity": ["quantity", "qty", "units", "no of shares", "number of shares", "shares",
+                 "filled qty", "executed quantity", "no of units"],
+    "price": ["trade price", "executed price", "execution price", "average price",
+              "avg price", "price per unit", "nav", "rate", "price"],
+    "amount": ["net amount", "trade value", "total amount", "gross amount", "turnover",
+               "amount", "value", "total"],
+}
+
+BUY_WORDS = {"buy", "b", "bought", "purchase", "purchased", "credit", "cr", "sip",
+             "investment", "invest", "subscription"}
+SELL_WORDS = {"sell", "s", "sold", "sale", "redeem", "redemption", "redeemed", "debit",
+              "dr", "withdrawal", "switch out"}
+
+DATE_FORMATS = ["%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y", "%d-%b-%Y", "%d %b %Y",
+                "%d-%B-%Y", "%d %B %Y", "%Y/%m/%d", "%b %d, %Y", "%d.%m.%Y"]
+
+# A bare NSE ticker needs a suffix before yfinance will recognise it. Applied only when the
+# symbol has no suffix already and looks like a ticker rather than a scheme name.
+_TICKERISH = re.compile(r"^[A-Z0-9&\-]{1,20}$")
+
+
+def _norm(header: str) -> str:
+    h = str(header or "").replace("﻿", "").strip().lower()
+    h = re.sub(r"[^a-z0-9]+", " ", h)
+    return " ".join(h.split())
+
+
+def map_columns(headers: list) -> tuple:
+    """(mapping, unmapped_headers). Longest synonym wins, so 'trade price' beats 'price'."""
+    normalised = {_norm(h): h for h in headers if str(h).strip()}
+    mapping: dict = {}
+    for field, synonyms in FIELD_SYNONYMS.items():
+        for syn in sorted(synonyms, key=len, reverse=True):
+            for norm_header, original in normalised.items():
+                if norm_header == syn and original not in mapping.values():
+                    mapping[field] = original
+                    break
+            if field in mapping:
+                break
+    # Second pass: allow a containment match for anything still unfilled, so
+    # "Buy/Sell Indicator" or "Quantity (Nos.)" are not missed.
+    for field, synonyms in FIELD_SYNONYMS.items():
+        if field in mapping:
+            continue
+        for syn in sorted(synonyms, key=len, reverse=True):
+            for norm_header, original in normalised.items():
+                if syn in norm_header and original not in mapping.values():
+                    mapping[field] = original
+                    break
+            if field in mapping:
+                break
+    unmapped = [h for h in headers if h and h not in mapping.values()]
+    return mapping, unmapped
+
+
+def parse_date(value) -> date | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    raw = raw.split("T")[0].strip()
+    # Drop a trailing clock time ("2025-03-14 09:15:00", "14-03-2025 09:15 AM")
+    raw = re.sub(r"\s+\d{1,2}:\d{2}(:\d{2})?\s*([AaPp][Mm])?$", "", raw).strip()
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def parse_number(value) -> float | None:
+    raw = str(value or "").strip()
+    if not raw or raw in {"-", "--", "NA", "N/A", "nan", "None"}:
+        return None
+    neg = raw.startswith("(") and raw.endswith(")")      # (1,234.56) accounting negative
+    raw = re.sub(r"[^\d.\-]", "", raw)
+    if raw in {"", "-", "."}:
+        return None
+    try:
+        n = float(raw)
+    except ValueError:
+        return None
+    return -n if neg else n
+
+
+def parse_side(value, quantity: float | None) -> str | None:
+    """Explicit side wins; otherwise a signed quantity carries the direction."""
+    token = _norm(value)
+    if token:
+        words = set(token.split())
+        if words & BUY_WORDS or token in BUY_WORDS:
+            return BUY
+        if words & SELL_WORDS or token in SELL_WORDS:
+            return SELL
+    if quantity is not None and quantity != 0:
+        return BUY if quantity > 0 else SELL
+    return None
+
+
+def normalise_symbol(symbol: str, name: str = "") -> tuple:
+    """(symbol, source). Bare NSE tickers get .NS; anything that looks like a fund scheme
+    is left unresolved rather than guessed — resolving it needs the AMFI list, which is a
+    network call and belongs in a tool, not a parser."""
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return None, ""
+    if "." in sym or sym.startswith("^") or sym.endswith("-USD"):
+        return sym, "crypto" if sym.endswith("-USD") else "yfinance"
+    if sym.isdigit() and len(sym) >= 5:          # AMFI scheme codes are numeric
+        return sym, "mftool"
+    if _TICKERISH.match(sym) and not sym.isdigit():
+        return f"{sym}.NS", "yfinance"
+    return sym, ""
+
+
+class ImportError_(ValueError):
+    """Raised only when the file as a whole cannot be understood."""
+
+
+def read_transactions(text: str) -> tuple:
+    """Parse statement text into (transactions, skipped_notes, mapping, unmapped)."""
+    try:
+        sample = text[:4096]
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+    except csv.Error:
+        dialect = csv.excel
+    rows = list(csv.reader(io.StringIO(text), dialect))
+    if not rows:
+        raise ImportError_("The file is empty.")
+
+    # Broker exports often prepend title/account banner lines, so the header is the first
+    # row that actually maps to a date plus a quantity.
+    header_idx, mapping, unmapped = None, {}, []
+    for i, row in enumerate(rows[:20]):
+        candidate, unmapped_c = map_columns(row)
+        if "date" in candidate and "quantity" in candidate:
+            header_idx, mapping, unmapped = i, candidate, unmapped_c
+            break
+    if header_idx is None:
+        seen = [h for h in rows[0] if str(h).strip()][:12]
+        raise ImportError_(
+            "Could not find a transaction header row. I need at least a DATE column and a "
+            f"QUANTITY column. Columns I saw: {seen}. If your export names them something "
+            "else, tell me and I'll add the synonym.")
+
+    headers = rows[header_idx]
+    txns, skipped = [], []
+    for n, row in enumerate(rows[header_idx + 1:], start=header_idx + 2):
+        if not any(str(c).strip() for c in row):
+            continue
+        rec = dict(zip(headers, row))
+        try:
+            txn = _row_to_txn(rec, mapping)
+        except ValueError as e:
+            skipped.append(f"line {n}: {e}")
+            continue
+        if txn:
+            txns.append(txn)
+    if not txns:
+        raise ImportError_(
+            "No usable transactions found. "
+            + ("; ".join(skipped[:5]) if skipped else "every row was empty or unparseable."))
+    return txns, skipped, mapping, unmapped
+
+
+def _row_to_txn(rec: dict, mapping: dict):
+    def val(field):
+        col = mapping.get(field)
+        return rec.get(col) if col else None
+
+    when = parse_date(val("date"))
+    if when is None:
+        raise ValueError(f"unreadable date {str(val('date'))[:24]!r}")
+
+    qty = parse_number(val("quantity"))
+    price = parse_number(val("price"))
+    amount = parse_number(val("amount"))
+    side = parse_side(val("side"), qty)
+
+    if qty is None and price and amount:
+        qty = amount / price
+    if qty is None or qty == 0:
+        raise ValueError("no usable quantity")
+    if price is None and amount:
+        price = abs(amount) / abs(qty)
+    if price is None or price <= 0:
+        raise ValueError("no usable price (and none derivable from amount / quantity)")
+    if side is None:
+        raise ValueError("could not tell buy from sell, and the quantity is unsigned")
+
+    symbol_raw = str(val("symbol") or "").strip()
+    name = str(val("name") or "").strip() or symbol_raw
+    if not symbol_raw and not name:
+        raise ValueError("row identifies no instrument")
+
+    symbol, _ = normalise_symbol(symbol_raw or name)
+    return Transaction(date=when, side=side, units=abs(qty), price=abs(price),
+                       symbol=symbol or "", name=name or symbol_raw)
+
+
+def to_holdings(txns: list) -> list:
+    """Group transactions into the holding dicts the rest of the engine already consumes.
+
+    The returned shape matches `agent.read_portfolio` — same keys, so every existing tool
+    keeps working — plus a `transactions` list. `reconstruct_holding` prefers that when it
+    is present, because real trade dates and executed prices beat reconstructing units from
+    a monthly amount.
+    """
+    grouped: dict = {}
+    for t in txns:
+        key = t.symbol or t.name
+        grouped.setdefault(key, []).append(t)
+
+    holdings = []
+    for key, group in grouped.items():
+        group.sort(key=lambda t: t.date)
+        symbol, source = normalise_symbol(group[0].symbol, group[0].name)
+        gross_buys = sum(t.value for t in group if t.side == BUY)
+        holdings.append({
+            "name": group[0].name or key,
+            "symbol": symbol,
+            "source": source,
+            "type": "", "market": "", "risk": "",
+            "total_invested": round(gross_buys, 2),
+            # Kept so anything still reading `inflows` degrades instead of breaking; the
+            # transactions below are the authoritative record.
+            "inflows": [(t.date.year, t.date.month, t.value)
+                        for t in group if t.side == BUY],
+            "transactions": group,
+        })
+    holdings.sort(key=lambda h: -h["total_invested"])
+    return holdings
+
+
+def read_broker_csv(path: str) -> tuple:
+    """(holdings, notes). Notes carry the column mapping and any skipped rows, so a user
+    can see how their file was interpreted rather than having to trust it."""
+    if not os.path.exists(path):
+        raise ImportError_(f"File not found: {path}")
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
+        text = f.read()
+    txns, skipped, mapping, unmapped = read_transactions(text)
+    holdings = to_holdings(txns)
+    notes = {
+        "transactions": len(txns),
+        "holdings": len(holdings),
+        "column_mapping": mapping,
+        "ignored_columns": unmapped,
+        "skipped_rows": skipped,
+        "unresolved_instruments": [h["name"] for h in holdings if not h["source"]],
+        "date_range": [min(t.date for t in txns).isoformat(),
+                       max(t.date for t in txns).isoformat()],
+    }
+    return holdings, notes
