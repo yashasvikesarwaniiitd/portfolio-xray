@@ -157,8 +157,20 @@ uv run python -m xray_agent investigate "Why is my portfolio down this month?" -
 ```
 
 ```bash
-make evals-agent-free
+make evals-agent-mix     # ~Rs 2-3: the cases that need a good model on Anthropic,
+                         # the rest free on Groq
+make evals-agent-free    # Rs 0: everything on Groq
+make evals-agent         # ~Rs 3-6: everything on Anthropic
 ```
+
+Each eval case declares a tier. `heavy` means it genuinely needs a capable model — the two
+cases that test whether the agent ADAPTS, and the fault-injection case that has to recover
+from a dead tool. `light` cases mostly check that plumbing holds, and a free model
+exercises them just as well. `--route id=provider` forces any single case either way.
+
+One rule the router enforces: **the divergence pair must share a provider.** Running
+`sample_why_down` on Anthropic against `demo_b_why_down` on Groq would compare two models,
+not two portfolios, so the check reports NOT COMPARABLE rather than a meaningless pass.
 
 Three things to say about this, because they are the interesting part:
 
