@@ -35,17 +35,23 @@ eval asserts this directly: the **same question over two different portfolios mu
 different tool sequences** (`divergence_check` in `evals/agent_evals.py`). If they ever match,
 the agent is following a script and the claim in this section is false.
 
-> **Measured status: this check is currently FAILING, and the claim above is therefore not
-> yet demonstrated.** On the only full run to date (`openai/gpt-oss-120b`, Groq free tier,
-> 2026-10-27) both portfolios produced the identical sequence
-> `attribute_move → get_news → get_news`.
+> **Measured status: PASSES on `claude-haiku-4-5`, FAILS on `openai/gpt-oss-120b`**
+> (Groq free tier). Both measured 2026-10-27; see [`evals/agent_baseline.md`](evals/agent_baseline.md).
 >
-> The architecture permits adaptation — nothing in the loop fixes the order — but *permitting*
-> it is not *doing* it, and a weak model can fall back on a habitual pattern regardless of
-> what the evidence says. The honest reading is that this is a model-capability result, not
-> an architecture result, and it is unresolved until a stronger model is measured. The test
-> is doing exactly its job: it was written to be falsifiable, and it falsified the claim.
-> Re-run with `make evals-agent` (Anthropic) to settle it.
+> | portfolio | tools the agent chose | steps |
+> |---|---|---|
+> | `sample` (6 holdings, spread) | `load_portfolio → portfolio_snapshot → attribute_move` | 4 |
+> | `demo_b` (46% in one bank) | `portfolio_snapshot → attribute_move → load_portfolio → concentration → get_news ×2 → portfolio_xirr → holding_units` | 9 |
+>
+> The concentrated book earned more than twice the investigation: having seen one holding
+> dominate, the agent went after concentration, that holding's units and XIRR, and news
+> about it. The diversified book needed three calls. Nothing in the loop encodes that
+> difference — it came from the evidence.
+>
+> On `gpt-oss-120b` both portfolios produced the identical `attribute_move → get_news →
+> get_news`. So adaptation is a property of the **agent plus a capable model**, not of the
+> scaffolding alone, and the honest claim is exactly that. The test discriminating between
+> two models is the test working.
 
 What it is **not**: there is no multi-agent fan-out, no autonomous scheduling, no persistent
 memory between runs. Those are on the ladder in §8, not in the code. The agency here is in
@@ -317,6 +323,16 @@ the right trade.
 12-step budget a tool that takes a minute and writes a file is a good way to spend the whole
 budget on one call. *Cost:* the agent cannot produce the Excel report; the existing `/report`
 endpoint still can.
+
+**An investigation costs 10x a chat turn, and I under-estimated it badly.** Measured:
+Rs 2.41 for a 4-step run, Rs 8.69 for a 9-step one — against Rs 0.73 for a chat turn. The
+driver is that every tool result stays in the message history and is re-sent on each
+subsequent turn, so cost grows roughly with steps squared, and `attribute_move` and
+`get_news` return 2.6KB and 5.9KB respectively. I had told myself "~Rs 3-6 for six cases";
+three cases cost Rs 16.73. *Cost:* the Rs 10 default cost budget stops a 12-step run
+before it finishes, which is arguably correct but means deep investigations need an
+explicit higher budget. The obvious fix is summarising or dropping stale tool results from
+the history, which I have not built.
 
 **The gate costs a model call on every run.** *Cost:* ~₹0.01 and ~400ms per investigation,
 including on questions that were obviously fine. Worth it: it is the only thing standing

@@ -156,11 +156,18 @@ a manual target (`make evals-full`).
 | Operation | Avg cost | Latency |
 |---|---|---|
 | Chat turn (analytics, tools + synthesis) | **₹0.73** | ~6.4s |
+| Investigation (the agent: plan → tools → verify → report) | **₹2.41–8.69** | 16–32s |
 | Cited news answer (fetch → judge → synth) | ₹1.01 | ~25s |
 | Full AI health report (~10 guarded insight calls) | **₹4.56** | ~1–2 min |
 
 Everything runs on Haiku 4.5 ($1/$5 per MTok). The deployed demo rate-limits to 20 chat
 turns and 3 reports per IP per day, with a dashboard kill switch.
+
+An investigation costs roughly 3–12× a chat turn and scales with steps, because every tool
+result stays in the message history and is re-sent each turn — a 4-step run cost ₹2.41, a
+9-step run ₹8.69. That is the main thing I would optimise next (summarise or drop stale
+tool results), and it is why the Investigator is a separate capability rather than the
+default path for every question.
 
 ## Privacy design
 
