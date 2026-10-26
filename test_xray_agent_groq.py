@@ -281,3 +281,77 @@ def test_advice_is_still_refused_on_groq_before_any_tool_runs():
     assert state.outcome is RunOutcome.REFUSED
     assert tools.calls == []
     assert "not a SEBI-registered investment adviser" in state.summary
+
+
+# --- failure modes found on the free tier --------------------------------------------------
+
+_TPD = ("Error code: 429 - Rate limit reached for model `openai/gpt-oss-120b` on tokens "
+        "per day (TPD): Limit 200000, Used 197148. Please try again in 8m25.872s")
+_TOOL_JSON = ('Error code: 400 - Failed to parse tool call arguments as JSON, '
+              'code: tool_use_failed, failed_generation: {"arguments": {"}')
+
+
+def test_a_models_malformed_tool_json_is_retried_even_though_it_is_a_400():
+    """Groq rejects the MODEL's bad tool JSON server-side with a 400, before any response
+    reaches us — so the defensive parsing in from_openai_response never runs. A 400
+    normally means we sent something wrong and retrying is pointless, but tool_use_failed
+    is a sampling failure and another draw has a good chance of being valid. Weaker models
+    hit this often; gpt-oss-120b emitted '{"name": "concentration", "arguments": {"}"}'."""
+    class _E(Exception):
+        status_code = 400
+
+    assert is_retryable(_E(_TOOL_JSON))
+    assert not is_retryable(_E("invalid api key"))      # a real 400 is still fatal
+
+
+def test_a_per_day_quota_fails_fast_instead_of_burning_retries():
+    """A per-minute limit clears in seconds and is worth waiting for. A per-day cap will
+    not clear inside this run, and the first live suite spent six retries discovering
+    that. Fail now, with the provider's message, which says when it resets."""
+    from xray_agent.adapters.retrying_llm import is_daily_quota
+
+    class _E(Exception):
+        status_code = 429
+
+    assert is_daily_quota(_E(_TPD))
+    assert not is_daily_quota(_E("Rate limit reached: 30 requests per minute"))
+
+    slept = []
+
+    class Capped:
+        model = "fake"
+
+        def generate(self, **kw):
+            raise _E(_TPD)
+
+    with pytest.raises(_E):
+        RetryingLLM(Capped(), max_retries=6, sleep=slept.append).generate(
+            system="s", messages=[])
+    assert slept == []          # no retries burned on a quota that cannot clear
+
+
+def test_retry_after_is_parsed_from_the_message_body_not_just_headers():
+    """Groq puts the wait in the body text, not a Retry-After header."""
+    class _E(Exception):
+        status_code = 429
+
+    assert retry_after_seconds(_E(_TPD)) == pytest.approx(505.872)   # 8m25.872s
+
+
+def test_an_ordinary_per_minute_limit_is_still_retried():
+    slept, calls = [], {"n": 0}
+
+    class _E(Exception):
+        status_code = 429
+
+    class Limited:
+        model = "fake"
+
+        def generate(self, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _E("Rate limit reached: 30 requests per minute, try again in 2.0s")
+            return _groq_says("ok")
+
+    RetryingLLM(Limited(), sleep=slept.append).generate(system="s", messages=[])
+    assert slept == [2.0]
