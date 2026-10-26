@@ -363,3 +363,28 @@ def test_run_tool_dispatches_to_the_portfolio_it_is_given(tmp_path):
     out, err = agent.run_tool("load_portfolio", {}, str(a))
     assert not err
     assert [h["name"] for h in _j.loads(out)["holdings"]] == ["OnlyInA"]
+
+
+def test_a_broken_classifier_says_so_instead_of_impersonating_a_refusal():
+    """The deployed app once refused EVERY query, including "What is beta?", because its
+    API key was missing — and the message read exactly like the SEBI compliance refusal.
+    An outage and a policy decision must not be indistinguishable. Refusing is still the
+    safe direction; pretending to have decided is not."""
+    import agent
+    import router
+
+    class Boom:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                raise RuntimeError("no API key")
+
+    r = router.classify(Boom(), "What is beta?")
+    assert r["category"] == "advice"      # still fails safe
+    assert r["degraded"] is True          # but marked as a failure, not a decision
+
+    out = agent.answer_query(Boom(), [], "What is beta?", {}, log=False)
+    assert out["category"] == "degraded"
+    assert out["refused"] is True
+    assert "service problem" in out["answer"]
+    assert "SEBI" not in out["answer"]    # must not claim a compliance rationale

@@ -1434,6 +1434,18 @@ def answer_query(client: anthropic.Anthropic, messages: list, user_text: str,
                              round((time.perf_counter() - started) * 1000))
         return result
 
+    if route.get("degraded"):
+        # The classifier failed rather than deciding. Refusing is still correct, but
+        # saying "I can't give advice" would be a lie about why - and would hide a dead
+        # backend behind language that reads like policy.
+        msg = ("I can't answer that right now — my query classifier is unreachable, so I'm "
+               "holding back rather than guessing. This is a service problem on my side, "
+               "not a judgement about your question. The deterministic views (portfolio "
+               "analysis, holdings) don't depend on it and still work.")
+        messages.append({"role": "assistant", "content": msg})
+        return _finish({"category": "degraded", "answer": msg, "tools_used": [],
+                        "refused": True, "reason": route.get("reason", "")})
+
     if category == "advice":
         state["advice_streak"] = state.get("advice_streak", 0) + 1
         ref = refusals.refuse(user_text, repeat=state["advice_streak"] - 1)

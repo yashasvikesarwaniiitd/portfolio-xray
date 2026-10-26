@@ -74,5 +74,11 @@ def classify(client, query: str, model: str = ROUTER_MODEL, usage=None) -> dict:
                 if cat in CATEGORIES:
                     return {"category": cat, "reason": block.input.get("reason", "")}
     except Exception as e:
-        return {"category": "advice", "reason": f"router error, failing safe: {e}"}
-    return {"category": "advice", "reason": "router could not classify; failing safe"}
+        # Still refuse - that is the safe direction - but mark it DEGRADED. An outage and
+        # a compliance decision must not be indistinguishable to the caller: the deployed
+        # app once refused every single query, including "What is beta?", because its API
+        # key was missing, and it looked exactly like the product working as designed.
+        return {"category": "advice", "degraded": True,
+                "reason": f"router error, failing safe: {e}"}
+    return {"category": "advice", "degraded": True,
+            "reason": "router returned no usable category; failing safe"}

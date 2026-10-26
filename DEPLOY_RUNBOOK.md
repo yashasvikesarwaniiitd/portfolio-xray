@@ -109,3 +109,31 @@ and put the Streamlit URL + repo URL in the Typeform.
 | Report button fails with limit message | 3 reports/IP/day — by design; use `XRAY_DISABLED` only for cost spikes, not limits |
 | Render build fails on pandas/matplotlib | Re-deploy once (free-tier build memory blip); build is cached the second time |
 | Everything on fire during review | Set `XRAY_DISABLED=1`, breathe, fix, set back to `0` |
+
+
+## If the chat refuses everything
+
+Symptom: every question — including `What is beta?` — comes back with the SEBI refusal,
+while the dashboard and holdings pages work fine.
+
+Cause: the router's classifier call is failing, and it fails **safe**, which means
+refusing. An unreachable model therefore looks identical to a compliance decision. The
+usual reason is a missing or invalid `ANTHROPIC_API_KEY` on the backend.
+
+Confirm it in one request — `/stats` tells you without spending anything:
+
+```bash
+curl -s https://portfolio-xray-yqdd.onrender.com/stats
+```
+
+`"avg_cost_usd": 0` together with an average latency around **150ms** means no model call
+is being made at all; a real classifier round-trip is ~1s and costs something. Then check
+Render → the service → Environment → `ANTHROPIC_API_KEY`, and verify the key still works:
+
+```bash
+curl -s https://api.anthropic.com/v1/messages -H "x-api-key: $ANTHROPIC_API_KEY"   -H "anthropic-version: 2023-06-01" -H "content-type: application/json"   -d '{"model":"claude-haiku-5-5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+Since the fix in this repo, a classifier failure answers with "my query classifier is
+unreachable … this is a service problem on my side" instead of the compliance refusal, so
+the two are no longer confusable from the outside.
