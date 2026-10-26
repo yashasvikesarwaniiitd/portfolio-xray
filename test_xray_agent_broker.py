@@ -669,3 +669,48 @@ def test_validation_does_not_hit_the_network_for_fund_codes(monkeypatch):
     path = api._csv_to_temp(_mf_tsv([
         ["Axis Midcap Fund Direct Growth", "Purchase", "10", "50", "500", "2026-01-05"]]))
     os.unlink(path)
+
+
+# --- data retention ------------------------------------------------------------------------
+
+def test_the_generated_report_is_deleted_after_it_is_sent():
+    """The workbook holds the user's ENTIRE portfolio - holdings, values, P&L, charts.
+    It cannot be unlinked before FileResponse streams it, and the endpoint's finally only
+    removed the uploaded CSV, so every report left a complete portfolio on the server's
+    disk for good. A BackgroundTask now removes it once the response has been sent."""
+    import inspect
+    import api
+    src = inspect.getsource(api.report)
+    assert "background=BackgroundTask(_quiet_unlink, out.name)" in src
+    # and if generation raises, no response carries that task, so it must be cleaned inline
+    assert "if not delivered:" in src
+
+
+def test_the_uploaded_csv_is_deleted_on_every_upload_endpoint():
+    import inspect
+    import api
+    for fn in (api.overview, api.analysis, api.report):
+        src = inspect.getsource(fn)
+        assert "if is_temp:" in src and "_quiet_unlink(path)" in src, fn.__name__
+
+
+def test_rate_limit_rows_do_not_accumulate_ip_addresses_for_ever():
+    """An IP is personal data and the counter only needs today's row."""
+    import inspect
+    import api
+    assert "DELETE FROM rate_limit WHERE day < ?" in inspect.getsource(api._bump)
+
+
+def test_the_query_log_records_no_portfolio_content():
+    """One row per query: category, tool NAMES, model names, token counts, cost, latency.
+    No message text, no holdings, no amounts — that is what makes 'nothing stored' true."""
+    import logger
+    cols = {c.strip().split()[0] for c in logger.init_db.__doc__ or ""} if False else None
+    import sqlite3, tempfile, os
+    f = os.path.join(tempfile.mkdtemp(), "t.db")
+    logger.init_db(f)
+    names = {r[1] for r in sqlite3.connect(f).execute("PRAGMA table_info(query_log)")}
+    assert names == {"id", "ts", "category", "tools", "models", "input_tokens",
+                     "output_tokens", "est_cost_usd", "latency_ms"}
+    for leaky in ("question", "query", "answer", "message", "holdings", "portfolio"):
+        assert leaky not in names

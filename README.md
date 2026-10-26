@@ -270,8 +270,24 @@ built.
 - **Tiered inputs**: weights-only (Tier 1) unlocks allocation/diversification/
   concentration/overlap — no amounts needed. Monthly SIP history (Tier 2) unlocks exact
   values, risk and cost. The report says exactly what each tier unlocks.
-- **Nothing stored**: uploads live in a temp file for one request and are deleted; only
-  aggregate token/cost counters persist. `/stats` exposes aggregates only.
+- **Nothing stored**: an uploaded portfolio lives in a temp file for one request and is
+  deleted in a `finally` on every endpoint that accepts one. The generated Excel report is
+  deleted by a `BackgroundTask` once the response has been sent — it cannot be unlinked
+  before `FileResponse` streams it, and for a while it was not being unlinked at all,
+  which left a complete portfolio workbook on disk after every report. Found by auditing
+  the write paths rather than by anything failing.
+- **The query log holds no portfolio content**: one row per query with category, tool
+  *names*, model names, token counts, cost and latency — no message text, no holdings, no
+  amounts. There is a test asserting the table has no column that could carry any.
+- **Several portfolios, none of them stored**: the multi-portfolio switcher keeps each one
+  in Streamlit's session state, in the browser. Nothing is written server-side, which is
+  why they are lost on refresh — a deliberate trade, since a public demo has no auth and
+  persisting strangers' portfolios to save them a re-upload is a bad bargain.
+- **Rate limiting keeps IP addresses for one day**: the counter needs only today's row, so
+  older ones are deleted on write rather than accumulating.
+- The Investigator's SQLite tables (`investigation_runs`) *do* record the question and the
+  summary verbatim. **No deployed endpoint writes them** — the agent is CLI-only today, and
+  exposing it would mean changing that first.
 - **Key server-side**: the frontend knows one secret — the backend URL.
 
 ## Known limitations (honest)

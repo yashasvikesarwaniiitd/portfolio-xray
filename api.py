@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.background import BackgroundTask
 
 import agent
 import logger
@@ -58,6 +59,9 @@ def _bump(ip: str, kind: str, cap: int) -> bool:
                          "(ip TEXT, day TEXT, kind TEXT, n INTEGER, "
                          "PRIMARY KEY (ip, day, kind))")
             today = date.today().isoformat()
+            # An IP address is personal data and the counter only ever needs TODAY's row,
+            # so yesterday's are deleted rather than accumulated indefinitely.
+            conn.execute("DELETE FROM rate_limit WHERE day < ?", (today,))
             conn.execute(
                 "INSERT INTO rate_limit VALUES (?,?,?,1) "
                 "ON CONFLICT(ip, day, kind) DO UPDATE SET n = n + 1",
@@ -90,6 +94,13 @@ async def kill_switch(request: Request, call_next):
 
 
 # --- portfolio input handling ------------------------------------------------------------
+
+def _quiet_unlink(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
 
 def _csv_to_temp(csv_text: str) -> str:
     """Park an uploaded portfolio in a temp file for this request, and validate it the way
@@ -213,10 +224,7 @@ async def overview(request: Request, file: UploadFile | None = None):
         return JSONResponse(status_code=400, content={"error": str(e)})
     finally:
         if is_temp:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+            _quiet_unlink(path)
 
 
 def _nifty_window_return(first_flow: date | None) -> dict | None:
@@ -304,10 +312,7 @@ async def analysis(request: Request, file: UploadFile | None = None):
         return JSONResponse(status_code=500, content={"error": f"analysis failed: {e}"})
     finally:
         if is_temp:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+            _quiet_unlink(path)
 
 
 @app.post("/report")
@@ -321,20 +326,28 @@ async def report(request: Request, file: UploadFile | None = None, no_ai: int = 
         return JSONResponse(status_code=400, content={"error": str(e)})
     out = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
     out.close()
+    # The generated workbook holds the user's ENTIRE portfolio - holdings, values, P&L,
+    # charts, AI insights. It cannot be unlinked before FileResponse streams it, and the
+    # finally below only ever removed the uploaded CSV, so every report left a complete
+    # portfolio on the server's disk for good. That directly contradicts the "nothing
+    # stored" promise. A BackgroundTask deletes it once the response has been sent.
+    delivered = False
     try:
         from report import generate_report
         res = generate_report(path, out.name, use_ai=not bool(no_ai))
+        delivered = True
         return FileResponse(out.name, filename="Portfolio_Health_Report.xlsx",
                             media_type="application/vnd.openxmlformats-officedocument."
                                        "spreadsheetml.sheet",
                             headers={"X-Report-Level": res["level"],
                                      "X-Report-Cost-INR":
-                                         str(res["insight_cost"]["est_cost_inr"])})
+                                         str(res["insight_cost"]["est_cost_inr"])},
+                            background=BackgroundTask(_quiet_unlink, out.name))
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     finally:
         if is_temp:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+            _quiet_unlink(path)
+        if not delivered:
+            # Generation failed, so no response will carry the background task away.
+            _quiet_unlink(out.name)
