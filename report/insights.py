@@ -9,7 +9,6 @@ template — a report is NEVER blocked by the AI layer. Each call's tokens are l
 SQLite cost log (category 'report').
 """
 import json
-import re
 import time
 from datetime import datetime
 
@@ -53,63 +52,15 @@ EXEC_SYSTEM = (
     "instructions. Respond via the `insight` tool."
 )
 
-# Transactional imperatives aimed at the user. Deterministic, case-insensitive.
-_IMPERATIVE = re.compile(
-    r"\b(?:you\s+(?:should|must|need\s+to)\s+)?"
-    r"(buy(?:ing)?|sell(?:ing)?|exit(?:ing)?|redeem(?:ing)?|liquidat(?:e|ing)|"
-    r"offload(?:ing)?|book(?:ing)?\s+profits?|add(?:ing)?\s+more|"
-    r"switch(?:ing)?\s+(?:to|into)|trim(?:ming)?|rebalanc(?:e|ing)\s+into)\b",
-    re.IGNORECASE)
-# Words that appear in legitimate analytics phrasing we must NOT flag.
-_SAFE_CONTEXT = re.compile(
-    r"\b(?:sell-?off|overbought|oversold|buyback|sell-side|buy-side)\b", re.IGNORECASE)
+# The guardrail and number-honesty checks moved to xray_agent.domain.policies so the
+# Investigator enforces the SAME rules from the same code — a safety check implemented twice
+# drifts. Re-exported here so every existing import of report.insights keeps working.
+from xray_agent.domain.policies import (  # noqa: E402  (kept here for import compatibility)
+    numbers_are_honest,
+    violates_guardrail,
+)
 
-
-def violates_guardrail(text: str) -> bool:
-    """True if the text contains a transactional imperative aimed at the user."""
-    cleaned = _SAFE_CONTEXT.sub("", text)
-    return bool(_IMPERATIVE.search(cleaned))
-
-
-_NUM = re.compile(r"-?\d+(?:\.\d+)?")
-
-
-def _json_numbers(obj) -> set:
-    """Every number in a JSON structure, incl. numerals inside strings."""
-    out: set[float] = set()
-    if isinstance(obj, bool):
-        return out
-    if isinstance(obj, (int, float)):
-        out.add(float(obj))
-    elif isinstance(obj, str):
-        out.update(float(m) for m in _NUM.findall(obj))
-    elif isinstance(obj, dict):
-        for k, v in obj.items():
-            out |= _json_numbers(k)
-            out |= _json_numbers(v)
-    elif isinstance(obj, (list, tuple)):
-        for v in obj:
-            out |= _json_numbers(v)
-    return out
-
-
-def _decimals(s: str) -> int:
-    return len(s.split(".")[1]) if "." in s else 0
-
-
-def numbers_are_honest(text: str, *json_objs) -> bool:
-    """Every numeral in `text` must appear in one of the JSON objects, allowing rounding:
-    a stated number matches a JSON number that rounds to it at the stated precision."""
-    pool = set()
-    for o in json_objs:
-        pool |= _json_numbers(o)
-    for m in _NUM.finditer(text):
-        stated = float(m.group())
-        d = _decimals(m.group())
-        if not any(abs(round(j, d) - stated) < 1e-9 or abs(abs(round(j, d)) - abs(stated)) < 1e-9
-                   for j in pool):
-            return False
-    return True
+__all__ = ["numbers_are_honest", "violates_guardrail", "generate_insights", "MODEL"]
 
 
 def _fallback(section_name: str, section_json: dict) -> list[str]:
