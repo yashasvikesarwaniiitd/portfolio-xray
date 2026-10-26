@@ -11,11 +11,44 @@ import sqlite3
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "xray.db")
 
-# Anthropic pricing, USD per token. Haiku 4.5 = $1.00 / 1M input, $5.00 / 1M output
-# (confirmed via the claude-api reference, 2026-07-21). Manually updated, like RISK_FREE_RATE.
+# Anthropic pricing, USD per MILLION tokens, from the claude-api reference (2026-10-27).
+# Manually updated, like RISK_FREE_RATE.
+#
+# Haiku 5.5 has TWO rate cards chosen by prompt length: $0.10/$0.50 at or below 100K input
+# tokens, $0.50/$2.50 above it. Everything here runs well under 100K (the longest measured
+# investigation turn was ~13K), but modelling only the cheap card would silently
+# under-report the day something long slips through, and an under-reported cost is a cost
+# budget that does not stop a runaway.
+#
+# Cache reads bill at 0.1x the input rate and 5-minute cache writes at 1.25x, so a run that
+# uses prompt caching cannot be priced from input_tokens alone.
 PRICING = {
-    "claude-haiku-4-5": {"input": 1.00 / 1_000_000, "output": 5.00 / 1_000_000},
+    "claude-haiku-5-5": {
+        "input": 0.10, "output": 0.50,
+        "long_input": 0.50, "long_output": 2.50, "long_threshold": 100_000,
+    },
+    # Kept so historical rows in query_log still price correctly after the migration.
+    "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
 }
+CACHE_READ_MULTIPLIER = 0.1
+CACHE_WRITE_MULTIPLIER = 1.25
+
+
+def price_call(model: str, input_tokens: int, output_tokens: int,
+               cache_read: int = 0, cache_write: int = 0) -> float:
+    """USD for one model call. Unknown model -> 0.0, which is why a new model must be added
+    here deliberately: an unpriced model is invisible to the cost budget."""
+    p = PRICING.get(model)
+    if not p:
+        return 0.0
+    billed_input = input_tokens + cache_read + cache_write
+    long = "long_threshold" in p and billed_input > p["long_threshold"]
+    in_rate = (p["long_input"] if long else p["input"]) / 1_000_000
+    out_rate = (p["long_output"] if long else p["output"]) / 1_000_000
+    return (input_tokens * in_rate
+            + cache_read * in_rate * CACHE_READ_MULTIPLIER
+            + cache_write * in_rate * CACHE_WRITE_MULTIPLIER
+            + output_tokens * out_rate)
 USD_TO_INR = 86.0  # approximate; manually updated for the ₹-per-query figure
 
 
@@ -27,29 +60,40 @@ class Usage:
         self.calls = []  # list of (model, input_tokens, output_tokens)
 
     def add(self, model: str, resp) -> None:
+        """Record one call. Cache tokens are captured separately because they bill at a
+        different rate — counting a cached read as full-price input would overstate the
+        cost of exactly the thing we added caching to make cheap."""
         u = getattr(resp, "usage", None)
         if u is None:
             return
-        self.calls.append((model, int(getattr(u, "input_tokens", 0) or 0),
-                           int(getattr(u, "output_tokens", 0) or 0)))
+        self.calls.append((
+            model,
+            int(getattr(u, "input_tokens", 0) or 0),
+            int(getattr(u, "output_tokens", 0) or 0),
+            int(getattr(u, "cache_read_input_tokens", 0) or 0),
+            int(getattr(u, "cache_creation_input_tokens", 0) or 0),
+        ))
 
     def totals(self) -> tuple[int, int]:
-        return (sum(c[1] for c in self.calls), sum(c[2] for c in self.calls))
+        """(input, output). Input INCLUDES cache reads and writes, so the logged token
+        count still reflects everything that was actually sent."""
+        return (sum(c[1] + c[3] + c[4] for c in self.calls),
+                sum(c[2] for c in self.calls))
+
+    def cache_totals(self) -> tuple[int, int]:
+        """(read, written). Read staying at 0 across repeated calls means caching is not
+        working — the most common cause being a prefix shorter than the model's minimum."""
+        return (sum(c[3] for c in self.calls), sum(c[4] for c in self.calls))
 
     def models(self) -> list[str]:
         seen = []
-        for m, _, _ in self.calls:
-            if m not in seen:
-                seen.append(m)
+        for c in self.calls:
+            if c[0] not in seen:
+                seen.append(c[0])
         return seen
 
     def cost_usd(self) -> float:
-        total = 0.0
-        for model, inp, out in self.calls:
-            p = PRICING.get(model)
-            if p:
-                total += inp * p["input"] + out * p["output"]
-        return round(total, 6)
+        return round(sum(price_call(*c) for c in self.calls), 6)
 
 
 def init_db(path: str = DB_PATH) -> None:

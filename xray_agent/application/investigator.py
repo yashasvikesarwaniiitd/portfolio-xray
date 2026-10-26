@@ -40,14 +40,18 @@ RETRY_BASE_DELAY = 0.5
 LOOP_WARN_AT = 3
 
 
-def cost_inr(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Price one model call in rupees, from the same table the query log uses. An unpriced
-    model costs 0 rather than crashing — but it also means the budget cannot see it, so new
-    models must be added to logger.PRICING deliberately, with the docs checked."""
-    p = logger.PRICING.get(model)
-    if not p:
-        return 0.0
-    return (input_tokens * p["input"] + output_tokens * p["output"]) * logger.USD_TO_INR
+def cost_inr(model: str, input_tokens: int, output_tokens: int,
+             cache_read: int = 0, cache_write: int = 0) -> float:
+    """Price one model call in rupees. Delegates to logger.price_call rather than reading
+    the rate table itself — this function used to duplicate that arithmetic, and when the
+    table moved to per-million units it would have reported costs a million times too
+    high while still looking plausible in code review.
+
+    An unpriced model costs 0, which also means the budget cannot see it, so a new model
+    must be added to logger.PRICING deliberately.
+    """
+    return logger.price_call(model, input_tokens, output_tokens,
+                             cache_read, cache_write) * logger.USD_TO_INR
 
 
 def _key(name: str, args: dict) -> str:
@@ -148,13 +152,21 @@ class Investigator:
                              output_tokens=resp.output_tokens, cost_inr=charged,
                              latency_ms=latency, stop_reason=resp.stop_reason)
         self._record(state, "llm", {"model": resp.model, "in": resp.input_tokens,
-                                    "out": resp.output_tokens, "cost_inr": round(charged, 6),
+                                    "out": resp.output_tokens,
+                                    # "is caching working" is the question you actually ask
+                                    # of a trace, so record it rather than leaving it to be
+                                    # inferred from a suspiciously small input count.
+                                    "cache_read": getattr(resp, "cache_read_tokens", 0),
+                                    "cache_write": getattr(resp, "cache_write_tokens", 0),
+                                    "cost_inr": round(charged, 6),
                                     "latency_ms": latency, "stop_reason": resp.stop_reason,
                                     "budget": state.budget_snapshot()})
         return resp
 
     def _charge(self, state: RunState, resp) -> float:
-        c = cost_inr(resp.model, resp.input_tokens, resp.output_tokens)
+        c = cost_inr(resp.model, resp.input_tokens, resp.output_tokens,
+                     getattr(resp, "cache_read_tokens", 0),
+                     getattr(resp, "cache_write_tokens", 0))
         state.cost_inr += c
         return c
 

@@ -37,7 +37,7 @@ reconstructed, and it can express SELLS, which the SIP sheet cannot.
   monthly cadence — no reliable free live API exists for this
 
 ## Stack
-Python 3.12 + uv, Anthropic API (Haiku 4.5 everywhere: routing, judging, insights,
+Python 3.12 + uv, Anthropic API (Haiku 5.5 everywhere: routing, judging, insights,
 synthesis, and the Investigator's planner - overridable via XRAY_PLANNER_MODEL),
 yfinance, mftool/AMFI, SQLite logging, FastAPI + Streamlit.
 

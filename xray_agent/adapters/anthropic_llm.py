@@ -10,20 +10,36 @@ import os
 
 from ..ports.llm import LLMResponse, ToolCall
 
-DEFAULT_MODEL = os.environ.get("XRAY_PLANNER_MODEL", "claude-haiku-4-5")
+DEFAULT_MODEL = os.environ.get("XRAY_PLANNER_MODEL", "claude-haiku-5-5")
 
 
 class AnthropicLLM:
     """Wraps anthropic.Anthropic. Token counts come back on the response so the loop can
     price each call and charge it against the budget."""
 
-    def __init__(self, client, model: str = DEFAULT_MODEL):
+    def __init__(self, client, model: str = DEFAULT_MODEL, effort: str | None = None):
         self.client = client
         self.model = model
+        # Haiku 5.5 runs adaptive thinking and defaults to effort "medium". Left as None
+        # (the model's default) rather than forced down: tool-choice quality is what the
+        # divergence result depends on, and that is not worth trading for a few paise.
+        self.effort = effort
 
     def generate(self, *, system, messages, tools=None, max_tokens=1024, tool_choice=None):
-        kwargs = {"model": self.model, "max_tokens": max_tokens, "system": system,
-                  "messages": messages}
+        # Prompt caching. The render order is tools -> system -> messages, so ONE breakpoint
+        # on the system block caches the tool schemas too. Together they are ~2,800 tokens
+        # re-sent on every call of every turn, and on Haiku 5.5 the minimum cacheable
+        # prefix is 512 tokens so they qualify. On Haiku 4.5 the minimum was 4,096 and this
+        # would have silently done nothing - no error, just cache_read_input_tokens: 0.
+        kwargs = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "system": [{"type": "text", "text": system,
+                        "cache_control": {"type": "ephemeral"}}],
+            "messages": messages,
+        }
+        if self.effort:
+            kwargs["output_config"] = {"effort": self.effort}
         if tools:
             kwargs["tools"] = tools
         if tool_choice:
@@ -34,6 +50,13 @@ class AnthropicLLM:
                  for b in resp.content if b.type == "tool_use"]
         text = next((b.text for b in resp.content if b.type == "text"), "")
         usage = getattr(resp, "usage", None)
+        if resp.stop_reason == "refusal":
+            # New on Haiku 5.5 and there is NO server-side fallback. Without this the loop
+            # sees "not tool_use", takes the empty text as the answer, and reports a
+            # confident blank - the worst way to fail.
+            detail = getattr(getattr(resp, "stop_details", None), "category", None)
+            raise RuntimeError(
+                f"the model declined this request (safety category: {detail or 'unknown'})")
         return LLMResponse(
             stop_reason=resp.stop_reason,
             text=text,
@@ -41,6 +64,8 @@ class AnthropicLLM:
             assistant_content=resp.content,
             input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
             output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+            cache_read_tokens=int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+            cache_write_tokens=int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
             model=self.model,
         )
 

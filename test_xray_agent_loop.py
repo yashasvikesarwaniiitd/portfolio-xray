@@ -7,13 +7,15 @@ deterministic logic instead of being hoped for in a live run. No network, no API
 import json
 from datetime import date
 
+import pytest
+
 from xray_agent.adapters.anthropic_llm import ScriptedLLM, calls, classifies, says
 from xray_agent.application.investigator import Investigator
 from xray_agent.domain import policies
 from xray_agent.domain.models import Budget, RunOutcome
 from xray_agent.ports.tools import ToolResult
 
-PRICED_MODEL = "claude-haiku-4-5"   # present in logger.PRICING, so the cost budget is real
+PRICED_MODEL = "claude-haiku-5-5"   # present in logger.PRICING, so the cost budget is real
 
 
 class FakeTools:
@@ -393,3 +395,109 @@ def test_plan_revision_replaces_the_plan():
     state = agent_.investigate("Why am I down?", "portfolio.sample.csv")
 
     assert [s.description for s in state.plan] == ["revised: chase the one holding"]
+
+
+# --- pricing after the Haiku 5.5 migration ------------------------------------------------
+
+def test_haiku_5_5_is_an_order_of_magnitude_cheaper_than_4_5():
+    """The whole reason for the migration: $0.10/$0.50 per MTok against $1.00/$5.00."""
+    import logger
+    new = logger.price_call("claude-haiku-5-5", 10_000, 500)
+    old = logger.price_call("claude-haiku-4-5", 10_000, 500)
+    assert round(old / new, 1) == 10.0
+
+
+def test_the_long_prompt_rate_card_is_modelled():
+    """Haiku 5.5 bills $0.50/$2.50 above 100K input. Pricing only the cheap card would
+    under-report exactly when a run is most expensive — and an under-reported cost is a
+    cost budget that fails to stop a runaway."""
+    import logger
+    assert logger.price_call("claude-haiku-5-5", 120_000, 500) > \
+        logger.price_call("claude-haiku-5-5", 99_000, 500) * 4
+
+
+def test_a_cached_read_is_billed_at_a_tenth():
+    import logger
+    full = logger.price_call("claude-haiku-5-5", 10_000, 0)
+    cached = logger.price_call("claude-haiku-5-5", 0, 0, cache_read=10_000)
+    assert round(full / cached, 1) == 10.0
+
+
+def test_a_cache_write_costs_more_than_plain_input():
+    import logger
+    assert logger.price_call("claude-haiku-5-5", 0, 0, cache_write=10_000) > \
+        logger.price_call("claude-haiku-5-5", 10_000, 0)
+
+
+def test_an_unpriced_model_costs_zero_and_is_therefore_invisible_to_the_budget():
+    """Documented deliberately: a new model must be added to PRICING or the cost budget
+    silently stops guarding (which is what happens on Groq's free tier, by design)."""
+    import logger
+    assert logger.price_call("some-new-model", 10_000, 500) == 0.0
+
+
+def test_cost_inr_delegates_instead_of_duplicating_the_rate_table():
+    """Regression. cost_inr used to re-implement the arithmetic with per-TOKEN rates. When
+    the table moved to per-MILLION units it would have reported costs a million times too
+    high while still looking perfectly reasonable in review."""
+    import logger
+    from xray_agent.application.investigator import cost_inr
+    assert cost_inr("claude-haiku-5-5", 10_000, 500) == pytest.approx(
+        logger.price_call("claude-haiku-5-5", 10_000, 500) * logger.USD_TO_INR)
+    assert cost_inr("claude-haiku-5-5", 10_000, 500) < 1.0      # sanity: paise, not rupees
+
+
+def test_usage_captures_cache_tokens_separately():
+    import logger
+
+    class _U:
+        input_tokens, output_tokens = 1_000, 200
+        cache_read_input_tokens, cache_creation_input_tokens = 9_000, 0
+
+    class _R:
+        usage = _U()
+
+    u = logger.Usage()
+    u.add("claude-haiku-5-5", _R())
+    assert u.cache_totals() == (9_000, 0)
+    assert u.totals() == (10_000, 200)          # input total still counts everything sent
+    # and the cost reflects the cheap rate on the cached part
+    assert u.cost_usd() < logger.price_call("claude-haiku-5-5", 10_000, 200)
+
+
+def test_a_model_refusal_is_raised_not_returned_as_an_empty_answer():
+    """Haiku 5.5 can decline, with no server-side fallback. Without this the loop sees
+    'not tool_use', takes the empty text as the answer, and reports a confident blank."""
+    from xray_agent.adapters.anthropic_llm import AnthropicLLM
+
+    class _Resp:
+        stop_reason = "refusal"
+        stop_details = type("D", (), {"category": "cyber"})()
+        content, usage = [], None
+
+    class _Client:
+        messages = type("M", (), {"create": staticmethod(lambda **kw: _Resp())})()
+
+    with pytest.raises(RuntimeError, match="declined"):
+        AnthropicLLM(_Client()).generate(system="s", messages=[])
+
+
+def test_the_system_prompt_is_sent_as_a_cacheable_block():
+    """Render order is tools -> system -> messages, so one breakpoint on system caches the
+    tool schemas too — ~2,800 tokens re-sent on every call."""
+    from xray_agent.adapters.anthropic_llm import AnthropicLLM
+    sent = {}
+
+    class _Resp:
+        stop_reason, content, usage = "end_turn", [], None
+
+    class _Client:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                sent.update(kw)
+                return _Resp()
+
+    AnthropicLLM(_Client()).generate(system="SYS", messages=[], tools=[{"name": "t"}])
+    assert sent["system"] == [{"type": "text", "text": "SYS",
+                               "cache_control": {"type": "ephemeral"}}]

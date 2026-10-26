@@ -35,18 +35,18 @@ eval asserts this directly: the **same question over two different portfolios mu
 different tool sequences** (`divergence_check` in `evals/agent_evals.py`). If they ever match,
 the agent is following a script and the claim in this section is false.
 
-> **Measured status: PASSES on `claude-haiku-4-5`, FAILS on `openai/gpt-oss-120b`**
-> (Groq free tier). Both measured 2026-10-27; see [`evals/agent_baseline.md`](evals/agent_baseline.md).
+> **Measured status: PASSES on `claude-haiku-5-5` and on `claude-haiku-4-5`, FAILS on
+> `openai/gpt-oss-120b`** (Groq free tier). See [`evals/agent_baseline.md`](evals/agent_baseline.md).
 >
-> | portfolio | tools the agent chose | steps |
+> | portfolio | tools the agent chose (Haiku 5.5) | steps |
 > |---|---|---|
-> | `sample` (6 holdings, spread) | `load_portfolio → portfolio_snapshot → attribute_move` | 4 |
-> | `demo_b` (46% in one bank) | `portfolio_snapshot → attribute_move → load_portfolio → concentration → get_news ×2 → portfolio_xirr → holding_units` | 9 |
+> | `sample` (6 holdings, spread) | `attribute_move` | 3 |
+> | `demo_b` (46% in one bank) | `load_portfolio → attribute_move → portfolio_snapshot → get_news` | 5 |
 >
-> The concentrated book earned more than twice the investigation: having seen one holding
-> dominate, the agent went after concentration, that holding's units and XIRR, and news
-> about it. The diversified book needed three calls. Nothing in the loop encodes that
-> difference — it came from the evidence.
+> The concentrated book earned a wider investigation: having seen one holding dominate, the
+> agent went looking for what else it held and what was being said about it. The diversified
+> book needed one call. Nothing in the loop encodes that difference — it came from the
+> evidence. Haiku 4.5 showed the same shape more verbosely (3 calls against 8).
 >
 > On `gpt-oss-120b` both portfolios produced the identical `attribute_move → get_news →
 > get_news`. So adaptation is a property of the **agent plus a capable model**, not of the
@@ -357,15 +357,23 @@ the right trade.
 budget on one call. *Cost:* the agent cannot produce the Excel report; the existing `/report`
 endpoint still can.
 
-**An investigation costs 10x a chat turn, and I under-estimated it badly.** Measured:
-Rs 2.41 for a 4-step run, Rs 8.69 for a 9-step one — against Rs 0.73 for a chat turn. The
-driver is that every tool result stays in the message history and is re-sent on each
-subsequent turn, so cost grows roughly with steps squared, and `attribute_move` and
-`get_news` return 2.6KB and 5.9KB respectively. I had told myself "~Rs 3-6 for six cases";
-three cases cost Rs 16.73. *Cost:* the Rs 10 default cost budget stops a 12-step run
-before it finishes, which is arguably correct but means deep investigations need an
-explicit higher budget. The obvious fix is summarising or dropping stale tool results from
-the history, which I have not built.
+**Cost is dominated by re-sent history, and I twice got the numbers wrong by reasoning
+instead of measuring.** Every tool result stays in the message history and is re-sent on
+each subsequent turn, so cost grows faster than linearly in steps (`attribute_move` returns
+2.6KB, `get_news` 5.9KB). First error: I estimated "~Rs 3-6 for six cases" and three cases
+cost Rs 16.73 on Haiku 4.5. Second error: I then recommended prompt caching as the fix
+**without checking the minimum cacheable prefix** — Haiku 4.5's is 4,096 tokens, the
+system+tools prefix is ~2,840, so caching there would have silently done nothing at all
+(no error, just `cache_read_input_tokens: 0`).
+
+Migrating to Haiku 5.5 fixed both: 10x cheaper per token, a 512-token cache minimum so the
+prefix now caches (19,185 cached-read tokens against 15,443 uncached on a 5-step run), and
+fewer steps for the same verdict. The same three cases now cost **Rs 0.61, down from
+Rs 16.73 — 27x**. *Cost of the migration:* a newer tokenizer counts ~30% more tokens for
+the same text, and Haiku 5.5 can decline a request with `stop_reason: "refusal"` and no
+server-side fallback, which the loop now raises on rather than reporting as a blank answer.
+Trimming stale tool results from the history remains the next optimisation and is not
+built.
 
 **The gate costs a model call on every run.** *Cost:* ~₹0.01 and ~400ms per investigation,
 including on questions that were obviously fine. Worth it: it is the only thing standing

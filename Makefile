@@ -13,16 +13,16 @@ evals-full:      ## SPENDS API CREDITS (~Rs 5-10): live router/judge/insight eva
 	uv run pytest evals/ -q
 	uv run python evals/run_baseline.py
 
-evals-agent:     ## SPENDS API CREDITS (~Rs 30, measured): all 6 Investigator evals on Anthropic
+evals-agent:     ## SPENDS API CREDITS (~Rs 1.2, measured on Haiku 5.5): all 6 Investigator evals
 	uv run python evals/agent_evals.py
 
 evals-agent-free: ## FREE: the same evals on Groq's free tier (rate limited, expect retries)
 	uv run python evals/agent_evals.py --provider groq --out evals/agent_baseline_groq.md
 
-evals-agent-mix: ## ~Rs 17 (measured): 3 heavy cases on Anthropic, 3 light ones free on Groq
+evals-agent-mix: ## ~Rs 0.6 (measured): 3 heavy cases on Anthropic, 3 light ones free on Groq
 	uv run python evals/agent_evals.py --mix --out evals/agent_baseline_mixed.md
 
-demo:            ## SPENDS API CREDITS (~Rs 1): one investigation, offline market data
+demo:            ## ~Rs 0.25 (measured): one investigation, offline market data
 	uv run python -m xray_agent investigate "Why is my portfolio down this month?" \
 		--portfolio portfolio.demo_b.csv --mode replay --today 2026-10-26
 

@@ -1,17 +1,17 @@
 # Investigator eval baseline
 
-_Generated 2026-10-27 00:57 by `uv run python evals/agent_evals.py`. Market data from recorded fixtures (frozen at 2026-10-26); model decisions live. Providers: `anthropic` (claude-haiku-4-5)._
+_Generated 2026-10-27 02:31 by `uv run python evals/agent_evals.py`. Market data from recorded fixtures (frozen at 2026-10-26); model decisions live. Providers: `anthropic` (claude-haiku-5-5)._
 
-**3/3 cases passed.** Total cost Rs 16.73 (anthropic Rs 16.732).
+**3/3 cases passed.** Total cost Rs 0.61 (anthropic Rs 0.610).
 
 | case | tier | provider | pass | outcome | steps | Rs | verified/rejected | tools used |
 |---|---|---|---|---|---|---|---|---|
-| `sample_why_down` | heavy | anthropic | PASS | COMPLETED | 4 | 2.406 | 5/0 | load_portfolio, portfolio_snapshot, attribute_move |
-| `demo_b_why_down` | heavy | anthropic | PASS | COMPLETED | 9 | 8.690 | 5/0 | portfolio_snapshot, attribute_move, load_portfolio, concentration, get_news, portfolio_xirr, holding_units |
-| `fault_injection_beta` | heavy | anthropic | PASS | COMPLETED | 9 | 5.636 | 3/1 | load_portfolio, portfolio_snapshot, attribute_move, holding_units, beta, sharpe |
+| `sample_why_down` | heavy | anthropic | PASS | COMPLETED | 3 | 0.111 | 3/0 | attribute_move |
+| `demo_b_why_down` | heavy | anthropic | PASS | COMPLETED | 5 | 0.251 | 3/0 | load_portfolio, attribute_move, portfolio_snapshot, get_news |
+| `fault_injection_beta` | heavy | anthropic | PASS | COMPLETED | 5 | 0.247 | 4/0 | load_portfolio, attribute_move, concentration, beta, price_history |
 
 ## Tool-sequence divergence
 
 The same question over two different portfolios must produce different tool sequences — identical ones would mean the model is following a script, not investigating. Both halves must run on the SAME provider, or the comparison is between models rather than portfolios.
 
-**PASS** — sample ['load_portfolio', 'portfolio_snapshot', 'attribute_move']  vs  demo_b ['portfolio_snapshot', 'attribute_move', 'load_portfolio', 'concentration', 'get_news', 'get_news', 'portfolio_xirr', 'holding_units']
+**PASS** — sample ['attribute_move']  vs  demo_b ['load_portfolio', 'attribute_move', 'portfolio_snapshot', 'get_news']

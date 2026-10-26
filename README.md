@@ -216,8 +216,8 @@ case that passes today still passes on Monday. Full table in
 
 | Check | Result |
 |---|---|
-| Heavy cases on `claude-haiku-4-5` | **3/3 passed** (incl. fault injection: `beta` broken on purpose → the agent routed to `sharpe` rather than inventing a number) |
-| **Tool-sequence divergence** | **PASS** on Haiku — spread portfolio took 3 tool calls, the 46%-in-one-bank portfolio took 8, adding concentration, news, XIRR and that holding's units. **FAILS** on `openai/gpt-oss-120b`, where both produced the same sequence. |
+| Heavy cases on `claude-haiku-5-5` | **3/3 passed** (incl. fault injection: `beta` broken on purpose → the agent routed to `sharpe` rather than inventing a number) |
+| **Tool-sequence divergence** | **PASS** on Haiku 5.5 — the spread portfolio took 1 tool call, the 46%-in-one-bank portfolio took 4, adding `load_portfolio`, `portfolio_snapshot` and `get_news`. Also passed on Haiku 4.5 (3 calls vs 8). **FAILS** on `openai/gpt-oss-120b`, where both produced the same sequence. |
 | Light cases on Groq free tier | passed |
 
 The divergence check is the one that makes *"this is an agent, not a script"* falsifiable:
@@ -235,19 +235,27 @@ manual targets: `make evals-full` (assistant), `make evals-agent` (~₹30, all A
 
 | Operation | Avg cost | Latency |
 |---|---|---|
-| Chat turn (analytics, tools + synthesis) | **₹0.73** | ~6.4s |
-| Investigation (the agent: plan → tools → verify → report) | **₹2.41–8.69** | 16–32s |
-| Cited news answer (fetch → judge → synth) | ₹1.01 | ~25s |
-| Full AI health report (~10 guarded insight calls) | **₹4.56** | ~1–2 min |
+| Investigation (the agent: plan → tools → verify → report) | **₹0.11–0.25** | 10–20s |
+| Chat turn (analytics, tools + synthesis) | ₹0.73 ◇ | ~6.4s |
+| Cited news answer (fetch → judge → synth) | ₹1.01 ◇ | ~25s |
+| Full AI health report (~10 guarded insight calls) | ₹4.56 ◇ | ~1–2 min |
 
-Everything runs on Haiku 4.5 ($1/$5 per MTok). The deployed demo rate-limits to 20 chat
-turns and 3 reports per IP per day, with a dashboard kill switch.
+◇ _measured on Haiku 4.5, before the migration below. They should fall by roughly the same order as the investigation figure did, but I have not re-measured them, so the old numbers stand rather than a flattering guess._
 
-An investigation costs roughly 3–12× a chat turn and scales with steps, because every tool
-result stays in the message history and is re-sent each turn — a 4-step run cost ₹2.41, a
-9-step run ₹8.69. That is the main thing I would optimise next (summarise or drop stale
-tool results), and it is why the Investigator is a separate capability rather than the
-default path for every question.
+Everything runs on **Haiku 5.5** ($0.10/$0.50 per MTok). The deployed demo rate-limits to
+20 chat turns and 3 reports per IP per day, with a dashboard kill switch.
+
+**The three heavy eval cases cost ₹16.73 on Haiku 4.5 and ₹0.61 on Haiku 5.5 — 27× less.**
+Three effects compound: the model is 10× cheaper per token; **prompt caching** now works
+(Haiku 4.5's minimum cacheable prefix is 4,096 tokens and the ~2,840-token system+tools
+prefix fell under it, so caching there would have silently done nothing — Haiku 5.5's
+minimum is 512, and a 5-step run now serves 19,185 tokens from cache against 15,443
+uncached); and 5.5 reaches the same verdict in fewer steps (3/5/5 against 4/9/9), which
+matters because every tool result stays in the history and is re-sent each turn, so cost
+grows faster than linearly in steps.
+
+Trimming stale tool results from that history is the remaining optimisation, and it is not
+built.
 
 ## Privacy design
 

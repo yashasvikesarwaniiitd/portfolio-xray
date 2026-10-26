@@ -27,6 +27,10 @@ class LLMResponse:
     assistant_content: Any = None
     input_tokens: int = 0
     output_tokens: int = 0
+    # Billed at different rates (reads 0.1x, writes 1.25x), so they cannot be folded into
+    # input_tokens without mispricing every cached call.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     model: str = ""
 
     @property

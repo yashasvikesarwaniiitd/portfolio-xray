@@ -1,4 +1,4 @@
-"""AI insight layer for the health report — claude-haiku-4-5, guarded twice.
+"""AI insight layer for the health report — claude-haiku-5-5, guarded twice.
 
 The model receives one section's computed JSON and may ONLY restate numbers it was given.
 Two deterministic post-checks enforce the boundary mechanically:
@@ -14,7 +14,7 @@ from datetime import datetime
 
 import logger
 
-MODEL = "claude-haiku-4-5"
+MODEL = "claude-haiku-5-5"
 
 SYSTEM = (
     "You are the analytics narrator for a Portfolio Health Report. You receive ONE report "

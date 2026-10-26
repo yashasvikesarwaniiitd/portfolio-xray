@@ -1,11 +1,11 @@
 """Query router: classifies each user query into exactly one category so the agent can
 short-circuit advice/off-topic queries before any tool runs.
 
-Uses claude-haiku-4-5 (cheap) with low max_tokens and forced structured output. The router
+Uses claude-haiku-5-5 (cheap) with low max_tokens and forced structured output. The router
 is a gate, not the answerer — advice and offtopic never reach the tool-calling agent.
 """
 
-ROUTER_MODEL = "claude-haiku-4-5"
+ROUTER_MODEL = "claude-haiku-5-5"
 
 CATEGORIES = ["analytics", "news", "education", "advice", "offtopic"]
 

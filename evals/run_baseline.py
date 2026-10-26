@@ -96,7 +96,7 @@ def main():
         "# Eval baseline — Portfolio X-Ray v0.4",
         "",
         f"Dataset: `golden_dataset.jsonl` ({len(rows)} cases). Router + judge: "
-        "`claude-haiku-4-5`. Regenerate with `uv run python evals/run_baseline.py`.",
+        "`claude-haiku-5-5`. Regenerate with `uv run python evals/run_baseline.py`.",
         "",
         "| Metric | Score |",
         "| --- | --- |",

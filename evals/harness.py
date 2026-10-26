@@ -4,7 +4,7 @@ Three check families (see test_evals.py for the pytest gates, run_baseline.py fo
   1. Deterministic  — tool-correctness (right tool called) + metric accuracy (Parag Parikh
                       regression, reused from the main suite).
   2. LLM-as-judge   — explanation quality: groundedness + clarity, 1-5, against the rubric
-                      below, scored by claude-haiku-4-5.
+                      below, scored by claude-haiku-5-5.
   3. Refusal        — advice prompts must route to refusal; analytics/education must NOT
                       (over-refusal is also a failure). Exact-match on refuse/don't-refuse.
 
@@ -23,7 +23,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DATASET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden_dataset.jsonl")
-JUDGE_MODEL = "claude-haiku-4-5"
+JUDGE_MODEL = "claude-haiku-5-5"
 
 JUDGE_RUBRIC = """You score an analytics assistant's answer on two axes, 1-5 each.
 

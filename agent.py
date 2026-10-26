@@ -18,7 +18,7 @@ import news
 import refusals
 import router
 
-MODEL = "claude-haiku-4-5"
+MODEL = "claude-haiku-5-5"
 NIFTY50_SYMBOL = "^NSEI"  # yfinance symbol for the NIFTY 50 index
 # Risk-free rate for Sharpe = RBI 10Y G-Sec yield. No reliable free live API exists, so
 # this is UPDATED MANUALLY on a monthly cadence (see CLAUDE.md). Last set 2026-07-21.
