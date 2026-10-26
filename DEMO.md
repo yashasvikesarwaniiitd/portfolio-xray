@@ -143,6 +143,23 @@ miss prints a clear error; it never silently falls through to the network.
 
 ---
 
+## Langfuse (optional)
+
+```bash
+uv sync --extra tracing
+```
+
+Then put `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and optionally `LANGFUSE_HOST` in
+`.env` and add `--trace langfuse`. If the keys or the package are missing it prints one
+line and falls back to the console tracer, so this can never break a demo.
+
+**By default no portfolio content is exported** — tool names, evidence IDs, latencies,
+costs, budgets and outcomes go out, but not holding names, rupee amounts or the model's
+claims. `XRAY_TRACE_CONTENT=1` opts in, for development only. Say this out loud if anyone
+asks about the "nothing stored" promise in the README; it is tested, not just intended.
+
+---
+
 ## Questions you will get, and the short answers
 
 **"Is this really agentic?"** The next tool depends on the last result, and the eval asserts

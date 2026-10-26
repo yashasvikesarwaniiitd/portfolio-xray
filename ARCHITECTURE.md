@@ -230,6 +230,38 @@ answer. They are different problems and they get different handling.
 
 ---
 
+## 7a. Observability, and why redaction lives in the adapter
+
+Three tracers implement the same port: console (the demo surface), Langfuse, and no-op.
+Every run also persists to SQLite — `investigation_runs` and `investigation_steps` — so a
+run is inspectable with no network and no third party at all (`python -m xray_agent history`).
+
+Spans: `investigation` (root, type `agent`) → `llm.generate` (type `generation`, with token
+counts and rupee cost), `tool.<name>` (type `tool`, with evidence ID, cache hit, retries,
+latency), `verify.finding` (type `guardrail`), `plan`, `note`. Run-level scores: outcome,
+steps used, cost, elapsed, findings total/verified/rejected, verified ratio, evidence count,
+tool errors.
+
+**The core never knows about redaction.** It hands the tracer real values; what leaves the
+machine is each adapter's decision. The Langfuse adapter's default is that **no content
+leaves at all** — tool names, IDs, statuses, latencies, costs and outcomes go out, but not
+the holding names, the rupee amounts, or the model's claims. `XRAY_TRACE_CONTENT=1` opts in,
+for development only.
+
+The default is a placeholder, not a partial mask, because partial masking of financial text
+leaks more than people expect: a "masked" amount is often recoverable from a percentage and
+a total. What is still exported for a rejected finding is its *category*
+(`unsourced_number`, `advice_language`, `cites_failed_tool`…) — that is what you actually
+debug on, and it names no holding. Tests assert that a run containing "Reliance Industries"
+and `8100.25` exports neither.
+
+Langfuse is an **optional extra** (`uv sync --extra tracing`), deliberately absent from
+`requirements.txt`, so the deployed app never installs it and cannot be broken by it. Every
+hook swallows its own exceptions: a broken tracer degrades to a missing trace, never to a
+failed run, and there is a test for that too.
+
+---
+
 ## 8. Autonomy ladder
 
 | | | Status |
