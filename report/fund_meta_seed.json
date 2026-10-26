@@ -1,0 +1,149 @@
+{
+ "INFY.NS": {
+  "currency": "INR",
+  "expense_ratio_pct": null,
+  "market_cap": 4722739118080,
+  "quote_type": "EQUITY",
+  "sector": "Technology",
+  "top_holdings": null,
+  "ts": "2026-10-26"
+ },
+ "IVV": {
+  "currency": "USD",
+  "expense_ratio_pct": 0.03,
+  "market_cap": null,
+  "quote_type": "ETF",
+  "sector": null,
+  "top_holdings": [
+   {
+    "name": "NVIDIA Corp",
+    "pct": 8.37,
+    "symbol": "NVDA"
+   },
+   {
+    "name": "Apple Inc",
+    "pct": 7.36,
+    "symbol": "AAPL"
+   },
+   {
+    "name": "Microsoft Corp",
+    "pct": 5.77,
+    "symbol": "MSFT"
+   },
+   {
+    "name": "Amazon.com Inc",
+    "pct": 3.7,
+    "symbol": "AMZN"
+   },
+   {
+    "name": "Alphabet Inc Class A",
+    "pct": 3.06,
+    "symbol": "GOOGL"
+   },
+   {
+    "name": "Broadcom Inc",
+    "pct": 2.53,
+    "symbol": "AVGO"
+   },
+   {
+    "name": "Alphabet Inc Class C",
+    "pct": 2.45,
+    "symbol": "GOOG"
+   },
+   {
+    "name": "Meta Platforms Inc Class A",
+    "pct": 2.42,
+    "symbol": "META"
+   },
+   {
+    "name": "Micron Technology Inc",
+    "pct": 1.82,
+    "symbol": "MU"
+   },
+   {
+    "name": "Tesla Inc",
+    "pct": 1.51,
+    "symbol": "TSLA"
+   }
+  ],
+  "ts": "2026-10-26"
+ },
+ "QQQ": {
+  "currency": "USD",
+  "expense_ratio_pct": 0.18,
+  "market_cap": null,
+  "quote_type": "ETF",
+  "sector": null,
+  "top_holdings": [
+   {
+    "name": "NVIDIA Corp",
+    "pct": 8.33,
+    "symbol": "NVDA"
+   },
+   {
+    "name": "Apple Inc",
+    "pct": 7.35,
+    "symbol": "AAPL"
+   },
+   {
+    "name": "Microsoft Corp",
+    "pct": 5.76,
+    "symbol": "MSFT"
+   },
+   {
+    "name": "Micron Technology Inc",
+    "pct": 5.02,
+    "symbol": "MU"
+   },
+   {
+    "name": "Advanced Micro Devices Inc",
+    "pct": 4.17,
+    "symbol": "AMD"
+   },
+   {
+    "name": "Amazon.com Inc",
+    "pct": 4.07,
+    "symbol": "AMZN"
+   },
+   {
+    "name": "Meta Platforms Inc Class A",
+    "pct": 3.26,
+    "symbol": "META"
+   },
+   {
+    "name": "Alphabet Inc Class A",
+    "pct": 3.05,
+    "symbol": "GOOGL"
+   },
+   {
+    "name": "Alphabet Inc Class C",
+    "pct": 2.85,
+    "symbol": "GOOG"
+   },
+   {
+    "name": "Tesla Inc",
+    "pct": 2.82,
+    "symbol": "TSLA"
+   }
+  ],
+  "ts": "2026-10-26"
+ },
+ "RELIANCE.NS": {
+  "currency": "INR",
+  "expense_ratio_pct": null,
+  "market_cap": 16263325679616,
+  "quote_type": "EQUITY",
+  "sector": "Energy",
+  "top_holdings": null,
+  "ts": "2026-10-26"
+ },
+ "TCS.NS": {
+  "currency": "INR",
+  "expense_ratio_pct": null,
+  "market_cap": 9171851280384,
+  "quote_type": "EQUITY",
+  "sector": "Technology",
+  "top_holdings": null,
+  "ts": "2026-10-27"
+ }
+}

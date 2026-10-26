@@ -45,12 +45,27 @@ def detect_level(holdings: list[dict]) -> str:
 
 # --- market-metadata cache (yfinance; free, no API key) --------------------------------
 
+SEED_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "fund_meta_seed.json")
+
+
 def _load_cache() -> dict:
-    try:
-        with open(CACHE_PATH, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    """Runtime cache, backed by a committed seed.
+
+    yfinance's fund top-10 holdings are not reachable from the deployed host - the live
+    backend reports funds_with_disclosed_holdings: 0 where a local run gets 2 - so fund
+    overlap silently had no data in production even though the tool worked. The seed ships
+    that metadata for the demo portfolios' symbols, so overlap works on a cold instance
+    with no outbound call. It holds public fund data only, never a real holding.
+    """
+    merged: dict = {}
+    for path in (SEED_PATH, CACHE_PATH):
+        try:
+            with open(path, encoding="utf-8") as f:
+                merged.update(json.load(f))
+        except Exception:
+            continue
+    return merged
 
 
 def _save_cache(cache: dict) -> None:
@@ -67,6 +82,7 @@ def fetch_meta(symbol: str, cache: dict) -> dict:
     ent = cache.get(symbol)
     if ent and (date.today() - date.fromisoformat(ent.get("ts", "2000-01-01"))).days < 7:
         return ent
+    stale = ent          # kept: a failed refresh should not be worse than an old answer
     meta = {"sector": None, "market_cap": None, "currency": None, "expense_ratio_pct": None,
             "quote_type": None, "top_holdings": None, "ts": date.today().isoformat()}
     try:
@@ -91,6 +107,10 @@ def fetch_meta(symbol: str, cache: dict) -> dict:
             pass
     except Exception:
         pass
+    # A refresh that came back empty (blocked or rate-limited upstream) must not erase
+    # what we already had - stale fund holdings beat none at all.
+    if stale and not meta.get("top_holdings") and stale.get("top_holdings"):
+        return stale
     cache[symbol] = meta
     return meta
 
