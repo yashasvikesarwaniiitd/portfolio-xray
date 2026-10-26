@@ -45,7 +45,10 @@ UptimeRobot**.
    | `XRAY_DISABLED` | `0` |
    | `XRAY_PORTFOLIO` | `portfolio.sample.csv` |
 4. **Create Web Service** → wait for "Live" (first build ~5 min).
-5. Copy the service URL, e.g. `https://portfolio-xray-api.onrender.com`.
+5. Copy the service URL. Render appends a random suffix when the name is taken, so
+   it is **not** simply `portfolio-xray.onrender.com` — this deployment's is
+   `https://portfolio-xray-yqdd.onrender.com`. Take it from the Render dashboard rather than
+   guessing it, and check `/health` returns `{"status":"ok"}` before moving on.
 6. Sanity in the browser: `<URL>/health` → `{"status":"ok","version":"1.0.0"}`.
 
 > **Kill switch:** if costs ever spike, Dashboard → Environment → set `XRAY_DISABLED=1`
@@ -59,7 +62,7 @@ UptimeRobot**.
 3. **Advanced settings → Secrets** — paste (this is `.streamlit/secrets.toml.example`
    with your real backend URL):
    ```toml
-   BACKEND_URL = "https://portfolio-xray-api.onrender.com"
+   BACKEND_URL = "https://portfolio-xray-yqdd.onrender.com"
    ```
 4. **Deploy** → you get `https://<something>.streamlit.app` — **this is the URL for the
    Razorpay form.**
@@ -75,7 +78,7 @@ UptimeRobot**.
    AI blocks present; cost caption ≈ ₹3–6.
 4. **Guardrails over HTTP** (PowerShell, costs a few rupees):
    ```powershell
-   $env:XRAY_BASE_URL = "https://portfolio-xray-api.onrender.com"
+   $env:XRAY_BASE_URL = "https://portfolio-xray-yqdd.onrender.com"
    uv run pytest tests/test_deployed.py -v
    ```
    All pass = the refusal boundary and the poisoned-name injection defence survived the
