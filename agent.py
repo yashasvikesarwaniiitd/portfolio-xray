@@ -167,10 +167,11 @@ TOOLS = [
         "name": "portfolio_snapshot",
         "description": "Value the user's whole portfolio. For each holding it routes to the right "
                        "provider by its 'source' (yfinance for stocks/ETFs, yfinance for crypto "
-                       "pairs, mftool for mutual funds; 'manual'/blank are skipped). Because the "
-                       "CSV records money invested (not units), current value is ESTIMATED: units "
-                       "≈ invested ÷ average price over the accumulation window, valued at today's "
-                       "price. Returns per-holding invested/estimated-value/P&L and portfolio "
+                       "pairs, mftool for mutual funds; 'manual'/blank are skipped). Values use "
+                       "EXACT unit reconstruction: units per SIP = amount / the price on that "
+                       "SIP's date, summed, then valued at the latest available price. These are "
+                       "computed figures, not estimates. Returns per-holding invested/value/P&L "
+                       "and portfolio "
                        "totals. Holdings with no live price appear as 'price unavailable' and are "
                        "excluded from totals — never dropped, never crashing the snapshot. All "
                        "math is in Python.",
@@ -979,12 +980,49 @@ def search_fund(query: str, limit: int = 10) -> str:
             if all(w in n.lower() for w in words)]
     if not hits:
         raise ValueError(f"No AMFI scheme matches '{query}'. Try fewer/simpler words.")
+    enriched = _disambiguate_plans(hits)
     hits.sort(key=lambda h: ("direct" not in h["scheme_name"].lower(),
                              "growth" not in h["scheme_name"].lower(),
                              h["scheme_name"]))
+    note = "Pass the chosen fund_code to get_nav. Direct-Growth variants are listed first."
+    if not enriched and len({h["scheme_name"] for h in hits}) < len(hits):
+        # Be honest rather than confidently wrong: if we could not recover the plan/option,
+        # say the ordering is not meaningful instead of letting the model claim otherwise.
+        note = ("AMFI's master list returned the same name for several variants of this "
+                "fund and the per-scheme lookup was unavailable, so the plan (Direct vs "
+                "Regular) and option (Growth vs IDCW) could NOT be determined. Do not tell "
+                "the user which variant this is; the order below is not meaningful.")
     return json.dumps({"query": query, "matches": hits[:limit], "total_matches": len(hits),
-                       "note": "Pass the chosen fund_code to get_nav. Direct-Growth "
-                               "variants are listed first."})
+                       "note": note})
+
+
+def _disambiguate_plans(hits: list[dict], max_lookups: int = 8) -> bool:
+    """Recover the plan/option qualifier when AMFI's master list has dropped it.
+
+    AMFI's scheme-code list used to return names like "... - Direct Plan - Growth". For at
+    least some funds it now returns the bare scheme name for EVERY variant, which made the
+    Direct-Growth sort below sort on text that no longer exists: all keys compared equal
+    and the "Direct Growth first" ordering became whichever variant AMFI happened to list
+    first. The system prompt tells the model to pick Direct Growth and say so, so this was
+    the agent confidently naming a variant it had not actually identified.
+
+    The per-scheme detail endpoint still carries the full name, so we fetch it - but only
+    when the master-list names actually collide, and only for a handful of hits, so the
+    common case costs no extra network at all. Returns True if every hit was resolved.
+    """
+    if len({h["scheme_name"] for h in hits}) == len(hits) or len(hits) > max_lookups:
+        return False
+    resolved = 0
+    for h in hits:
+        try:
+            detail = _mf().get_scheme_details(h["fund_code"]) or {}
+            full = str(detail.get("scheme_name") or "").strip()
+            if full:
+                h["scheme_name"] = full
+                resolved += 1
+        except Exception:
+            continue  # a lookup failure must not break the search
+    return resolved == len(hits)
 
 
 def fetch_nav(fund_code: str) -> str:

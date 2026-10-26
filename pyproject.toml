@@ -19,6 +19,11 @@ dependencies = [
     "yfinance>=1.5.1",
 ]
 
+[project.optional-dependencies]
+tracing = [
+    "langfuse>=5.0.4",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",

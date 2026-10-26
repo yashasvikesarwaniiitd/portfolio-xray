@@ -24,10 +24,15 @@ via deterministic Python tools, and explains results with citations.
   monthly cadence — no reliable free live API exists for this
 
 ## Stack
-Python 3.12 + uv, Anthropic API (Haiku 4.5 routing/judging, Sonnet 4.6
-synthesis), yfinance, mftool/AMFI, SQLite logging. Later: FastAPI + Streamlit.
+Python 3.12 + uv, Anthropic API (Haiku 4.5 everywhere: routing, judging, insights,
+synthesis, and the Investigator's planner - overridable via XRAY_PLANNER_MODEL),
+yfinance, mftool/AMFI, SQLite logging, FastAPI + Streamlit.
 
 ## Conventions
 - Secrets in .env only (ANTHROPIC_API_KEY), never committed.
 - Every production failure becomes a pair in golden_dataset.jsonl.
 - Tag versions v0.0, v0.1... at each ship check.
+- The Investigator (`xray_agent/`) follows the dependency rule: `domain/` imports no
+  adapter and no SDK, so the whole agent loop stays testable with a scripted model.
+  A finding reaches the user only if `verify_finding` passes - prompts are not a
+  safety mechanism on their own. See ARCHITECTURE.md.
