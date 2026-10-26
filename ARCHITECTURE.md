@@ -35,6 +35,18 @@ eval asserts this directly: the **same question over two different portfolios mu
 different tool sequences** (`divergence_check` in `evals/agent_evals.py`). If they ever match,
 the agent is following a script and the claim in this section is false.
 
+> **Measured status: this check is currently FAILING, and the claim above is therefore not
+> yet demonstrated.** On the only full run to date (`openai/gpt-oss-120b`, Groq free tier,
+> 2026-10-27) both portfolios produced the identical sequence
+> `attribute_move → get_news → get_news`.
+>
+> The architecture permits adaptation — nothing in the loop fixes the order — but *permitting*
+> it is not *doing* it, and a weak model can fall back on a habitual pattern regardless of
+> what the evidence says. The honest reading is that this is a model-capability result, not
+> an architecture result, and it is unresolved until a stronger model is measured. The test
+> is doing exactly its job: it was written to be falsifiable, and it falsified the claim.
+> Re-run with `make evals-agent` (Anthropic) to settle it.
+
 What it is **not**: there is no multi-agent fan-out, no autonomous scheduling, no persistent
 memory between runs. Those are on the ladder in §8, not in the code. The agency here is in
 *how it decides to investigate*, which is the honest claim for a product whose core safety
