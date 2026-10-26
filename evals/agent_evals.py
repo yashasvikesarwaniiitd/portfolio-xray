@@ -1,7 +1,8 @@
-"""Live evals for the Investigator. SPENDS ANTHROPIC CREDITS — never in CI.
+"""Live evals for the Investigator. Makes real model calls — never in CI.
 
-    uv run python evals/agent_evals.py            # all cases
-    uv run python evals/agent_evals.py --case two_portfolios_diverge
+    uv run python evals/agent_evals.py --provider groq      # FREE (rate limited)
+    uv run python evals/agent_evals.py                      # Anthropic, ~Rs 3-6
+    uv run python evals/agent_evals.py --case advice_is_refused
 
 Market data is served from the recorded fixtures, so prices are frozen and a case that
 passed today still passes on Monday. The model's decisions are fully live — which tools it
@@ -28,7 +29,7 @@ from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from xray_agent.adapters.anthropic_llm import DEFAULT_MODEL, AnthropicLLM  # noqa: E402
+from xray_agent.interfaces.cli import build_llm  # noqa: E402
 from xray_agent.adapters.legacy_tools import SCHEMAS  # noqa: E402
 from xray_agent.adapters.replay_tools import FaultInjectingTools, ReplayTools  # noqa: E402
 from xray_agent.application.investigator import Investigator  # noqa: E402
@@ -98,9 +99,9 @@ def _tools_for(case):
     return tools
 
 
-def run_case(case, client, model: str, verbose: bool) -> dict:
+def run_case(case, llm, verbose: bool) -> dict:
     tools = _tools_for(case)
-    agent = Investigator(AnthropicLLM(client, model=model), tools,
+    agent = Investigator(llm, tools,
                          budget=Budget(max_steps=12, max_cost_inr=10.0, max_seconds=120.0),
                          today=TODAY)
     state = agent.investigate(case["question"], case["portfolio"])
@@ -161,27 +162,36 @@ def divergence_check(rows: list[dict]) -> tuple[bool, str]:
 def main() -> int:
     from dotenv import load_dotenv
     load_dotenv()
-    import anthropic
 
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--case", action="append", default=None)
-    p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--provider", choices=["anthropic", "groq"],
+                   default="anthropic",
+                   help="groq is free but rate limited; expect retries")
+    p.add_argument("--model", default=None)
+    p.add_argument("--retries", type=int, default=6)
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--out", default=os.path.join(os.path.dirname(__file__),
                                                  "agent_baseline.md"))
     args = p.parse_args()
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("ANTHROPIC_API_KEY not set. These evals make real model calls.", file=sys.stderr)
+    key = "GROQ_API_KEY" if args.provider == "groq" else "ANTHROPIC_API_KEY"
+    if not os.environ.get(key):
+        print(f"{key} not set. These evals make real model calls.", file=sys.stderr)
         return 2
 
     cases = [c for c in CASES if not args.case or c["id"] in args.case]
-    client = anthropic.Anthropic()
+    llm = build_llm(args.provider, args.model, retries=args.retries,
+                    verbose=args.verbose)
+    if args.provider == "groq":
+        print("[provider] groq: free inference means cost_inr is 0 and the cost budget "
+              "is inert;\n           steps and wall clock are the guards. Expect 429 "
+              "retries on the free tier.")
     rows = []
     for c in cases:
         print(f"running {c['id']} ...", flush=True)
         try:
-            rows.append(run_case(c, client, args.model, args.verbose))
+            rows.append(run_case(c, llm, args.verbose))
         except Exception as e:
             rows.append({"id": c["id"], "pass": False, "failures": [f"crashed: {e}"],
                          "outcome": "CRASH", "steps": 0, "cost_inr": 0.0, "elapsed_s": 0.0,
@@ -203,7 +213,8 @@ def main() -> int:
     print(f"\n{passed}/{len(rows)} cases passed | total Rs {total_cost:.2f}")
     print(f"tool-sequence divergence: {'PASS' if diverged else 'FAIL'} - {detail}")
 
-    _write_report(args.out, rows, passed, total_cost, diverged, detail, args.model)
+    _write_report(args.out, rows, passed, total_cost, diverged, detail,
+                  f"{args.provider}/{llm.model}")
     print(f"\nwrote {args.out}")
     return 0 if passed == len(rows) and diverged else 1
 

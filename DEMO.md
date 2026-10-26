@@ -143,6 +143,40 @@ miss prints a clear error; it never silently falls through to the network.
 
 ---
 
+## Running it free on Groq
+
+```bash
+uv sync --extra groq
+uv run python -m xray_agent models --provider groq      # what your key can actually reach
+```
+
+Put `GROQ_API_KEY` in `.env`, then:
+
+```bash
+uv run python -m xray_agent investigate "Why is my portfolio down this month?" --portfolio portfolio.demo_b.csv --mode replay --today 2026-10-26 --provider groq
+```
+
+```bash
+make evals-agent-free
+```
+
+Three things to say about this, because they are the interesting part:
+
+- **The agent loop did not change by one line.** Only the adapter differs. Tool schemas,
+  tool_choice, assistant turns, tool results (one Anthropic message of N blocks becomes N
+  OpenAI `role: "tool"` messages) and argument encoding are all translated in
+  `adapters/groq_llm.py`. A test runs a whole investigation through it.
+- **The cost budget is inert on a free tier.** `cost_inr` is 0, so steps and wall clock are
+  the only runaway guards. The CLI prints this rather than letting you assume three guards
+  are live when two are.
+- **Expect 429s.** Groq's free tier is rate limited (~30 req/min; check your console) and
+  one investigation makes 8-12 calls, so `RetryingLLM` wraps every provider now. Pass
+  `--retries` to tune, `--verbose` to watch it back off.
+
+Set `GROQ_MODEL` or pass `--model` to pick a model. Nothing is hardcoded beyond an
+overridable default, because Groq's free model list changes and the public write-ups
+disagree about it — `models` asks the API instead.
+
 ## Langfuse (optional)
 
 ```bash

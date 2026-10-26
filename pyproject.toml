@@ -23,6 +23,9 @@ dependencies = [
 tracing = [
     "langfuse>=5.0.4",
 ]
+groq = [
+    "groq>=1.7.0",
+]
 
 [dependency-groups]
 dev = [

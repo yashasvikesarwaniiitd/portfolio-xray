@@ -72,9 +72,24 @@ Arrows point inward. `domain/` imports nothing but the standard library and `met
 an adapter. That is what lets the entire loop be tested with a scripted model and canned
 tools — **95+ hermetic tests, no network, no API key**.
 
-An honest caveat: `ports/llm.py` is a **test seam, not provider independence**.
-`assistant_content` is handed back to the next request verbatim, so its shape is Anthropic's.
-Saying otherwise would be a lie told in code, and the docstring says so.
+An honest caveat, since updated by events: `ports/llm.py` was written as a **test seam,
+not provider independence** — `assistant_content` is handed back verbatim, so its shape was
+Anthropic's, and the docstring said so rather than claiming portability I had not built.
+
+Adding Groq tested that claim. The result: **the application layer did not change by one
+line**, and everything that had to move lived in one new adapter. What leaked, precisely:
+tool schemas (`input_schema` → `function.parameters`), `tool_choice`, assistant turns
+(content blocks → a `tool_calls` array), tool results (ONE Anthropic message holding N
+blocks → N messages with `role: "tool"`), arguments (dict ↔ JSON string), the missing
+`is_error` field, and `finish_reason` naming. That is the honest cost of the seam: real,
+bounded, and confined to `adapters/groq_llm.py`.
+
+Two consequences worth stating. Free inference means `cost_inr` is 0, so **the cost budget
+is inert on Groq** and only steps and wall clock guard a runaway — the CLI prints this.
+And Groq's free tier rate limits at roughly 30 requests/minute against 8-12 calls per
+investigation, which exposed a genuine gap: the loop retried transient *tool* failures but
+a 429 on the *model* call came straight back as outcome `FAILED`. `adapters/retrying_llm.py`
+now wraps either provider.
 
 ---
 
