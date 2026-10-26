@@ -167,10 +167,11 @@ TOOLS = [
         "name": "portfolio_snapshot",
         "description": "Value the user's whole portfolio. For each holding it routes to the right "
                        "provider by its 'source' (yfinance for stocks/ETFs, yfinance for crypto "
-                       "pairs, mftool for mutual funds; 'manual'/blank are skipped). Because the "
-                       "CSV records money invested (not units), current value is ESTIMATED: units "
-                       "≈ invested ÷ average price over the accumulation window, valued at today's "
-                       "price. Returns per-holding invested/estimated-value/P&L and portfolio "
+                       "pairs, mftool for mutual funds; 'manual'/blank are skipped). Values use "
+                       "EXACT unit reconstruction: units per SIP = amount / the price on that "
+                       "SIP's date, summed, then valued at the latest available price. These are "
+                       "computed figures, not estimates. Returns per-holding invested/value/P&L "
+                       "and portfolio "
                        "totals. Holdings with no live price appear as 'price unavailable' and are "
                        "excluded from totals — never dropped, never crashing the snapshot. All "
                        "math is in Python.",
