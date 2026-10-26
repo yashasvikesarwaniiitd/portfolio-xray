@@ -35,28 +35,24 @@ eval asserts this directly: the **same question over two different portfolios mu
 different tool sequences** (`divergence_check` in `evals/agent_evals.py`). If they ever match,
 the agent is following a script and the claim in this section is false.
 
-> **Measured status: diverged in 4 of 5 runs, and the claim is weaker than it first
-> looked.** See [`evals/agent_baseline.md`](evals/agent_baseline.md).
+> **Measured over 8 runs: the sequences differed in 7, but the DIRECTION is a coin
+> flip.** `demo_b` (concentrated) went deeper in 4 runs, `sample` (spread) went deeper in
+> 3, and one run was identical. Run with `--divergence-runs 3` to reproduce a rate rather
+> than a single sample.
 >
-> | run | `sample` (spread) | `demo_b` (46% one bank) | verdict |
-> |---|---|---|---|
-> | Haiku 4.5 | 3 tools | 8 tools | PASS |
-> | Haiku 5.5 #1 | 1 | 4 | PASS |
-> | Haiku 5.5 #2 | 1 | 1 | **FAIL** |
-> | Haiku 5.5 #3 | 1 | 2 | PASS |
-> | Haiku 5.5 #4 | **3** | **2** | PASS (inverted) |
+> **What this supports:** the loop does not fix the tool order, the model chooses it, and
+> the choice is not a fixed script — `openai/gpt-oss-120b` produced the *same* sequence on
+> both portfolios every time it was run, which is what script-like behaviour looks like
+> and is exactly what this check exists to catch.
 >
-> The tool sequence varies more between RUNS than between PORTFOLIOS, and run #4 inverted
-> the direction entirely — the diversified book used more tools than the concentrated one.
-> So the earlier write-up here, that "the concentrated book earned a wider investigation",
-> was reading one sample of a stochastic process as a stable property. It is not one.
+> **What it does not support:** that the agent investigates a concentrated book more
+> deeply *because* it is concentrated. An earlier version of this document said so, with
+> tool counts, on the strength of one run. The direction does not hold up across repeats,
+> and variation between runs is larger than variation between portfolios.
 >
-> What the evidence still supports: the loop does not fix the order, the model picks it,
-> and `openai/gpt-oss-120b` produced the SAME sequence on both portfolios every time while
-> Haiku varies. What it does not support is a claim of consistent, evidence-driven
-> adaptation — that needs repeated runs and a pass RATE, which the harness does not yet
-> compute. Building that is the honest next step; quoting the one run that looked best
-> would not be.
+> Distinguishing real adaptation from sampling noise needs more than a tool-count
+> comparison — something like whether the holding the agent drills into is the one the
+> evidence flagged. That is not built, and saying so is more useful than a greener number.
 
 What it is **not**: there is no multi-agent fan-out, no autonomous scheduling, no persistent
 memory between runs. Those are on the ladder in §8, not in the code. The agency here is in

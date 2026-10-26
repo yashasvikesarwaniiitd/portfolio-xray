@@ -134,3 +134,48 @@ def test_an_explicit_max_seconds_overrides_both():
     pool = ev.LLMPool(A())
     assert pool.budget_for("groq").max_seconds == 55.0
     assert pool.budget_for("anthropic").max_seconds == 55.0
+
+
+# --- the divergence check measures a RATE, not one sample -----------------------------
+
+def test_a_single_diverging_run_passes_but_says_it_proves_little():
+    """Measured: across five single runs the pair diverged four times and matched once,
+    and on one the diversified book used MORE tools than the concentrated one. One PASS
+    was never the evidence it looked like."""
+    verdict, why = ev.divergence_check(_rows("anthropic", "anthropic", ["a"], ["b"]))
+    assert verdict == "PASS"
+    assert "ONE RUN ONLY" in why
+
+
+def test_diverging_on_every_repeat_passes_cleanly():
+    verdict, why = ev.divergence_check(
+        _rows("anthropic", "anthropic", ["a"], ["b"]),
+        extra_pairs=[(["a"], ["b", "c"]), (["a", "d"], ["b"])])
+    assert verdict == "PASS"
+    assert "diverged in 3 of 3" in why
+    assert "ONE RUN ONLY" not in why
+
+
+def test_identical_on_every_repeat_is_the_script_like_failure_this_exists_to_catch():
+    verdict, why = ev.divergence_check(
+        _rows("groq", "groq", ["attribute_move"], ["attribute_move"]),
+        extra_pairs=[(["attribute_move"], ["attribute_move"])])
+    assert verdict == "FAIL"
+    assert "every run" in why
+
+
+def test_a_split_result_is_reported_as_MIXED_with_its_rate():
+    """MIXED is a real finding, not a soft failure: it rules out a fixed script while
+    falling short of consistent adaptation. Rounding it to PASS or FAIL would throw away
+    the only honest thing the measurement says."""
+    verdict, why = ev.divergence_check(
+        _rows("anthropic", "anthropic", ["a"], ["b"]),
+        extra_pairs=[(["a"], ["a"]), (["a"], ["b"])])
+    assert verdict == "MIXED"
+    assert "diverged in 2 of 3" in why
+
+
+def test_the_split_pair_rule_still_wins_over_any_rate():
+    verdict, _ = ev.divergence_check(_rows("anthropic", "groq", ["a"], ["b"]),
+                                     extra_pairs=[(["a"], ["b"])])
+    assert verdict == "N-A"

@@ -241,21 +241,28 @@ def run_case(case, llm, verbose: bool, budget: Budget, provider: str) -> dict:
     return row
 
 
-def divergence_check(rows: list) -> tuple:
-    """The claim that this is an agent and not a pipeline, tested: the SAME question over
-    two different portfolios must produce different tool sequences, because the evidence
-    differs. Identical sequences mean the model is following a script.
+def divergence_check(rows: list, extra_pairs: list | None = None) -> tuple:
+    """Is the agent adapting to the evidence, or following a script?
 
-    KNOWN WEAKNESS, measured: this compares ONE sample of a stochastic process. Across
-    five observed runs the pair diverged four times and matched once, and on one run the
-    DIVERSIFIED portfolio used more tools than the concentrated one - so the sequences
-    vary more between runs than they do between portfolios. A single PASS is therefore
-    weak evidence of adaptation and a single FAIL is weak evidence against it. Reading
-    this honestly needs repeated runs and a pass RATE, which this harness does not yet do.
+    Same question, two portfolios: a script produces the same tool sequence every time.
+    `extra_pairs` holds (sample_tools, demo_b_tools) from additional repeats of just this
+    pair.
 
-    Returns one of PASS / FAIL / N-A. N-A when the pair did not both run, or ran on
-    different providers — in which case any difference could be the model rather than the
-    portfolio, and reporting a pass would claim something the run cannot support.
+    WHY THIS TAKES REPEATS. It compares samples of a stochastic process, and measurement
+    showed the sequence varies more between RUNS than between PORTFOLIOS - across five
+    single runs the pair diverged four times and matched once, and on one the DIVERSIFIED
+    book used more tools than the concentrated one. One PASS was therefore never the
+    evidence it looked like, and one FAIL is not either. So the verdict is a RATE:
+
+        FAIL   diverged in 0 of n runs - that is script-like behaviour, the thing this
+               check exists to catch
+        PASS   diverged in all n
+        MIXED  somewhere between, reported with the rate rather than rounded to a verdict
+               that flatters or condemns
+
+    MIXED is a real result, not a soft failure: it rules out a fixed script while falling
+    short of consistent, evidence-driven adaptation. Run with --divergence-runs 3 or more
+    before quoting any of this.
     """
     a = next((r for r in rows if r["id"] == DIVERGENCE_PAIR[0]), None)
     b = next((r for r in rows if r["id"] == DIVERGENCE_PAIR[1]), None)
@@ -264,9 +271,20 @@ def divergence_check(rows: list) -> tuple:
     if a["provider"] != b["provider"]:
         return "N-A", (f"pair ran on different providers ({a['provider']} vs "
                        f"{b['provider']}); this compares models, not portfolios")
-    if a["tools"] == b["tools"]:
-        return "FAIL", f"identical tool sequences on both portfolios: {a['tools']}"
-    return "PASS", f"sample {a['tools']}  vs  demo_b {b['tools']}"
+
+    observations = [(a["tools"], b["tools"])] + list(extra_pairs or [])
+    diverged = [i for i, (x, y) in enumerate(observations) if x != y]
+    n, k = len(observations), len(diverged)
+    detail = f"diverged in {k} of {n} run(s); " + "  |  ".join(
+        f"[{i+1}] sample {x} vs demo_b {y}" for i, (x, y) in enumerate(observations))
+    if k == 0:
+        return "FAIL", "identical tool sequences on every run - " + detail
+    if k == n:
+        if n == 1:
+            return "PASS", ("ONE RUN ONLY - not enough to claim consistency; rerun with "
+                            "--divergence-runs 3. " + detail)
+        return "PASS", detail
+    return "MIXED", detail
 
 
 # --- cli --------------------------------------------------------------------------------
@@ -301,6 +319,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model", default=None, help="model for --provider")
     p.add_argument("--premium-model", default=None, help="model for --premium-provider")
     p.add_argument("--retries", type=int, default=6)
+    p.add_argument("--divergence-runs", type=int, default=1,
+                   help="repeat the two why_down cases N times and report a divergence "
+                        "RATE. One run is not evidence either way; 3+ before quoting it.")
     p.add_argument("--max-steps", type=int, default=12)
     p.add_argument("--max-cost", type=float, default=10.0)
     p.add_argument("--max-seconds", type=float, default=None,
@@ -358,7 +379,29 @@ def main() -> int:
                          "cost_inr": 0.0, "elapsed_s": 0.0, "tools": [], "verified": 0,
                          "rejected": 0, "summary": ""})
 
-    verdict, detail = divergence_check(rows)
+    extra: list = []
+    pair_ran = {c["id"] for c in cases} >= set(DIVERGENCE_PAIR)
+    for rep in range(2, max(1, args.divergence_runs) + 1):
+        if not pair_ran:
+            break
+        print(f"repeat {rep}/{args.divergence_runs} of the divergence pair ...", flush=True)
+        got = {}
+        for cid in DIVERGENCE_PAIR:
+            case = next(c for c in CASES if c["id"] == cid)
+            prov = plan[cid]
+            try:
+                row = run_case(case, pool.get(prov), False, pool.budget_for(prov), prov)
+                got[cid] = row["tools"]
+                total_extra_cost = row["cost_inr"]
+                by_provider_extra = (prov, total_extra_cost)
+            except Exception as e:
+                print(f"   repeat failed: {e}")
+                got = {}
+                break
+        if len(got) == 2:
+            extra.append((got[DIVERGENCE_PAIR[0]], got[DIVERGENCE_PAIR[1]]))
+
+    verdict, detail = divergence_check(rows, extra)
     passed = sum(1 for r in rows if r["pass"])
     total_cost = sum(r["cost_inr"] for r in rows)
     by_provider: dict = {}
