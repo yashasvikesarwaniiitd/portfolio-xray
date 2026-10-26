@@ -112,6 +112,13 @@ def attribute_holding(h: dict, start: date, end: date,
         # adding money stripped out. This is the number that answers "why am I down".
         "gain": round(market_effect + gain_on_new_money, 2),
     }
+    # Unrounded values for aggregation. Summing the DISPLAY-rounded figures above would
+    # accumulate a cent of error per holding and show a non-zero identity residual that is
+    # pure presentation noise — which invites exactly the wrong question about an identity
+    # that is meant to be exact. Popped before the row is handed to the model.
+    row["_exact"] = {"value_start": value_start, "value_end": value_end,
+                     "market_effect": market_effect, "new_money": new_money,
+                     "gain_on_new_money": gain_on_new_money}
     if u0 > 0 and p0:
         row["price_change_pct"] = round((p1 / p0 - 1) * 100, 2)
     if new_money_unpriced:
@@ -139,11 +146,12 @@ def attribute_move(holdings: list[dict], start: date, end: date,
     done = [r for r in rows if r["status"] == "attributed"]
     gaps = [r for r in rows if r["status"] == "uncovered"]
 
-    value_start = sum(r["value_start"] for r in done)
-    value_end = sum(r["value_end"] for r in done)
-    market_effect = sum(r["market_effect"] for r in done)
-    new_money = sum(r["new_money"] for r in done)
-    gain_on_new_money = sum(r["gain_on_new_money"] for r in done)
+    exact = [r.pop("_exact") for r in done]
+    value_start = sum(e["value_start"] for e in exact)
+    value_end = sum(e["value_end"] for e in exact)
+    market_effect = sum(e["market_effect"] for e in exact)
+    new_money = sum(e["new_money"] for e in exact)
+    gain_on_new_money = sum(e["gain_on_new_money"] for e in exact)
     change = value_end - value_start
 
     uncovered_invested = sum(r["invested"] for r in gaps)
