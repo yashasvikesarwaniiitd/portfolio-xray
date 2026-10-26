@@ -1,8 +1,8 @@
 # Portfolio X-Ray 🩻
 
-**An agentic portfolio analyst for Indian retail investors that shows what their apps
-don't — true concentration, fund overlap, exact XIRR — and provably refuses to give
-advice.**
+**A portfolio analyst for Indian retail investors that shows what their apps don't —
+true concentration, fund overlap, exact XIRR — investigates *why* the portfolio moved,
+and provably refuses to give advice.**
 
 **Live demo:** **https://portfolio-xray.streamlit.app** · [Deploy runbook](DEPLOY_RUNBOOK.md) ·
 ![evals](https://github.com/yashasvikesarwaniiitd/portfolio-xray/actions/workflows/evals.yml/badge.svg)
@@ -28,15 +28,56 @@ DIY Indian retail investors with multi-app portfolios (stocks + mutual funds + E
 crypto) who want an honest X-ray of what they own — not a robo-adviser. Secondary
 audience: fintech teams evaluating how to ship LLM features inside a regulated boundary.
 
-## Why an agent, not a workflow
+## Two layers: a routed workflow, and an agent
 
-A fixed pipeline can't decide that "how risky am I?" needs four tools chained while "NAV
-of Parag Parikh?" needs one, and a bare LLM can't be trusted with either the arithmetic or
-the compliance line. So the model is used **only for routing and explanation**: a Haiku
+Being precise about this, because the distinction is the interesting part.
+
+**The assistant (v0.1-v1.1) is a routed workflow, and that was the right call.** A Haiku
 classifier gates every query into analytics / news / education / advice / offtopic, advice
 short-circuits into canned refusals *before any tool runs*, and every number the user sees
-is computed by pure Python that the model merely orchestrates. The refusal path fails
-safe — a router error is treated as advice, never as analytics.
+is computed by pure Python the model merely orchestrates. The refusal path fails safe - a
+router error is treated as advice, never as analytics. For "what's the NAV of Parag
+Parikh?" a deterministic pipeline is simply better than an agent: cheaper, faster, and
+easier to prove correct.
+
+**The Investigator (v1.2) is an agent, because one question needs one.** "Why is my
+portfolio down this month?" has no fixed answer shape. If one holding caused 80% of the
+fall, the next step is that holding's units and news. If the whole book fell together, the
+next step is the index and beta. If the value went *up* while performance went *down*, the
+next step is separating new money from market effect and leading with that. The next tool
+genuinely depends on the last result, so the model chooses the sequence - and the eval
+asserts that the same question over two different portfolios produces **different** tool
+sequences. If they ever match, the build fails, because then it is a script.
+
+What the code keeps away from the model: the advice gate, the step/cost/time budget, the
+evidence ledger, the verifier that rejects any number not present in the cited evidence,
+transient-vs-permanent failure handling, and a forced wrap-up that labels a partial answer
+as partial. Hand-written, no agent framework. Full design in
+[ARCHITECTURE.md](ARCHITECTURE.md); demo script in [DEMO.md](DEMO.md).
+
+### The number that justifies it
+
+A SIP portfolio makes "am I up or down" genuinely hard. For the demo portfolio over
+2026-07-01 to 2026-10-26:
+
+```
+change      +34,352.82      <- what every app shows you
+  market     -6,315.63      <- what the market actually did
+  new money +42,000.00      <- money you added, masking the loss
+  gain on it -1,331.56
+```
+
+The value rose by Rs 34k while the investments **lost Rs 7.6k**. `attribute_move`
+decomposes this exactly - the three parts sum to the change by construction, and the
+residual is computed at runtime and reported rather than assumed. Across both demo
+portfolios and all 12 recorded windows it is exactly `0.00`.
+
+```bash
+uv run python -m xray_agent investigate "Why is my portfolio down this month?"     --portfolio portfolio.demo_b.csv --mode replay --today 2026-10-26
+```
+
+`--mode replay` serves market data from recorded fixtures, so the demo cannot fail on bad
+wifi. The model's decisions stay live.
 
 ## Architecture
 
@@ -60,14 +101,41 @@ user ──► router (Haiku, structured output, fails safe)
    check: every numeral must exist in the section JSON) → tiered Excel
 ```
 
-SQLite logs every query's tokens, cost and latency. FastAPI serves it; Streamlit fronts
-it; the API key never leaves the server.
+The Investigator sits beside this as its own bounded loop:
+
+```
+question ─► ROUTER GATE ──advice──► canned refusal      (REFUSED, 0 tools)
+                 │
+                 ▼
+     ┌──── while budget remains (12 steps / Rs 10 / 120s) ────┐
+     │  update_plan      model states and revises its plan    │
+     │  domain tool      memoised, retried, recorded as E_n   │
+     │  record_finding   VERIFIED or rejected with a reason   │
+     │  finish           done                                 │
+     └────────────────────────────────────────────────────────┘
+                 │                        │
+            COMPLETED            budget spent ─► forced wrap-up
+                 └──────────┬─────────────┘      INCOMPLETE_BUDGET
+                            ▼
+                  summary guardrail ─► rewrite once ─► fixed template
+```
+
+Clean-architecture layering (`domain` / `application` / `ports` / `adapters`) is what lets
+the whole loop run against a scripted model and canned tools: **96 hermetic tests, no
+network, no API key.**
+
+SQLite logs every query's tokens, cost and latency, and every investigation's outcome,
+steps, cost and verified-findings ratio. FastAPI serves it; Streamlit fronts it; the API
+key never leaves the server.
 
 ## Evals (the centerpiece)
 
-Run on the 52-case labelled golden dataset (`evals/`), judge = Haiku with a calibration
-gate that must pass before its scores are trusted. Full table in
+Run on the labelled golden dataset (`evals/`), judge = Haiku with a calibration gate that
+must pass before its scores are trusted. Full table in
 [`evals/baseline.md`](evals/baseline.md).
+
+_Measured over the 52 cases present at the last baseline run. The dataset has since grown
+to 53; the table below is the last **measured** result, not re-stated for the new case._
 
 | Metric | Result | How it's measured |
 |---|---|---|
@@ -114,12 +182,25 @@ turns and 3 reports per IP per day, with a dashboard kill switch.
 - Free-tier cold start (~30s) — mitigated by a keep-warm ping and honest UI copy.
 - Judge-scored metrics (groundedness/clarity) vary run to run; the refusal and honesty
   metrics are exact-match and don't.
+- **There are two tool loops in the repo.** `agent.py` still has the original one and
+  the chat path uses it; the Investigator is a separate, newer loop. Unifying them is
+  the next refactor (ARCHITECTURE.md §11), not something I've done.
+- The Investigator is **L1 on the autonomy ladder** — it investigates when asked. It is
+  not scheduled, not multi-agent, and has no memory between runs.
 
 ## What I'd build next
 
-CAS PDF ingestion (one upload instead of CSV), full-holdings overlap via AMC factsheet
-parsing, a PDF report variant, and per-user auth so the public demo could hold real
-portfolios.
+1. **Unify the two loops** — move the chat path onto the Investigator and delete
+   `agent.turn`.
+2. **L2, the scheduled watcher** — the weekly digest becomes a cron-triggered run that
+   decides what is *worth* reporting and stays quiet when nothing moved.
+3. **Self-filing failures** — a rejected finding should append itself to the golden
+   dataset; `CLAUDE.md` promises this and today it's manual.
+4. **CAS PDF ingestion** (one upload instead of CSV) and full-holdings overlap via AMC
+   factsheet parsing.
+5. **A sandboxed `run_analysis(python_code)` tool** — lifts the ceiling from 13 fixed
+   tools to anything expressible in pandas, without breaking the no-arithmetic rule:
+   the model writes code, Python still computes.
 
 ---
 

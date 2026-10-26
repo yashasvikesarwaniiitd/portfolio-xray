@@ -6,9 +6,19 @@ test:            ## free, hermetic — what CI runs on every push
 test-regression: ## free, needs network (yfinance/AMFI)
 	uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py test_xray_agent_loop.py -m regression -q
 
+fixtures:        ## free (market data only, NO api credits): re-record replay fixtures
+	uv run python evals/record_fixtures.py
+
 evals-full:      ## SPENDS API CREDITS (~Rs 5-10): live router/judge/insight evals + baseline
 	uv run pytest evals/ -q
 	uv run python evals/run_baseline.py
+
+evals-agent:     ## SPENDS API CREDITS (~Rs 3-6): Investigator evals over replay fixtures
+	uv run python evals/agent_evals.py
+
+demo:            ## SPENDS API CREDITS (~Rs 1): one investigation, offline market data
+	uv run python -m xray_agent investigate "Why is my portfolio down this month?" \
+		--portfolio portfolio.demo_b.csv --mode replay --today 2026-10-26
 
 deployed:        ## post-deploy smoke vs live URL: XRAY_BASE_URL=https://... make deployed
 	uv run pytest tests/test_deployed.py -v
