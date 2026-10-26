@@ -47,7 +47,18 @@ FIELD_SYNONYMS = {
               "avg price", "price per unit", "nav", "rate", "price"],
     "amount": ["net amount", "trade value", "total amount", "gross amount", "turnover",
                "amount", "value", "total"],
+    # Not needed to build a transaction, but needed to decide whether it HAPPENED.
+    "status": ["order status", "execution status", "trade status", "status"],
+    "exchange": ["exchange name", "exchange", "segment"],
 }
+
+# A statement lists ORDERS, not trades. Cancelled, rejected and failed orders sit in the
+# same file as executed ones, and importing them inflates the portfolio with positions the
+# user never held. Groww's export has an "Order status" column for exactly this reason.
+EXECUTED_WORDS = {"executed", "execute", "complete", "completed", "success", "successful",
+                  "filled", "traded", "confirmed", "settled", "done", "ok"}
+NOT_EXECUTED_WORDS = {"cancelled", "canceled", "rejected", "failed", "expired", "pending",
+                      "open", "lapsed", "reversed", "cancel", "reject", "aborted"}
 
 BUY_WORDS = {"buy", "b", "bought", "purchase", "purchased", "credit", "cr", "sip",
              "investment", "invest", "subscription"}
@@ -140,10 +151,16 @@ def parse_side(value, quantity: float | None) -> str | None:
     return None
 
 
-def normalise_symbol(symbol: str, name: str = "") -> tuple:
-    """(symbol, source). Bare NSE tickers get .NS; anything that looks like a fund scheme
-    is left unresolved rather than guessed — resolving it needs the AMFI list, which is a
-    network call and belongs in a tool, not a parser."""
+def normalise_symbol(symbol: str, name: str = "", exchange: str = "") -> tuple:
+    """(symbol, source). A bare ticker needs a venue suffix before yfinance recognises it,
+    and the statement tells us which venue: NSE -> .NS, BSE -> .BO. Both forms resolve for
+    alphabetic tickers (verified against live data); a numeric BSE scrip code does not, so
+    those are left alone rather than given a suffix that would not work.
+
+    Anything that looks like a fund scheme is left unresolved rather than guessed —
+    mapping a scheme name to an AMFI code needs the AMFI list, which is a network call and
+    belongs in a tool, not a parser.
+    """
     sym = str(symbol or "").strip().upper()
     if not sym:
         return None, ""
@@ -152,8 +169,26 @@ def normalise_symbol(symbol: str, name: str = "") -> tuple:
     if sym.isdigit() and len(sym) >= 5:          # AMFI scheme codes are numeric
         return sym, "mftool"
     if _TICKERISH.match(sym) and not sym.isdigit():
-        return f"{sym}.NS", "yfinance"
+        suffix = ".BO" if "BSE" in _norm(exchange).upper() else ".NS"
+        return f"{sym}{suffix}", "yfinance"
     return sym, ""
+
+
+def order_executed(value) -> bool | None:
+    """True / False / None when the status is present but not recognised."""
+    token = _norm(value)
+    if not token:
+        return None
+    words = set(token.split())
+    if words & NOT_EXECUTED_WORDS:
+        return False
+    if words & EXECUTED_WORDS:
+        return True
+    return None
+
+
+class _FilteredRow(Exception):
+    """Row deliberately excluded (e.g. a cancelled order) — not a parse failure."""
 
 
 class ImportError_(ValueError):
@@ -188,28 +223,45 @@ def read_transactions(text: str) -> tuple:
 
     headers = rows[header_idx]
     txns, skipped = [], []
+    statuses: dict = {}
+    filtered = 0
     for n, row in enumerate(rows[header_idx + 1:], start=header_idx + 2):
         if not any(str(c).strip() for c in row):
             continue
         rec = dict(zip(headers, row))
+        if "status" in mapping:
+            raw = str(rec.get(mapping["status"]) or "").strip() or "(blank)"
+            statuses[raw] = statuses.get(raw, 0) + 1
         try:
             txn = _row_to_txn(rec, mapping)
+        except _FilteredRow:
+            filtered += 1
+            continue
         except ValueError as e:
             skipped.append(f"line {n}: {e}")
             continue
         if txn:
             txns.append(txn)
+    stats = {"status_counts": statuses, "filtered_not_executed": filtered,
+             "status_column": mapping.get("status")}
     if not txns:
-        raise ImportError_(
-            "No usable transactions found. "
-            + ("; ".join(skipped[:5]) if skipped else "every row was empty or unparseable."))
-    return txns, skipped, mapping, unmapped
+        detail = "; ".join(skipped[:5]) if skipped else "every row was empty or unparseable."
+        if filtered:
+            detail = (f"{filtered} row(s) were excluded because their order status was not "
+                      f"executed ({', '.join(sorted(statuses))}).")
+        raise ImportError_("No usable transactions found. " + detail)
+    return txns, skipped, mapping, unmapped, stats
 
 
 def _row_to_txn(rec: dict, mapping: dict):
     def val(field):
         col = mapping.get(field)
         return rec.get(col) if col else None
+
+    # An order that never executed is not a trade. Importing cancelled and rejected rows
+    # would silently inflate the portfolio with positions the user never held.
+    if order_executed(val("status")) is False:
+        raise _FilteredRow()
 
     when = parse_date(val("date"))
     if when is None:
@@ -236,7 +288,8 @@ def _row_to_txn(rec: dict, mapping: dict):
     if not symbol_raw and not name:
         raise ValueError("row identifies no instrument")
 
-    symbol, _ = normalise_symbol(symbol_raw or name)
+    exchange = str(val("exchange") or "")
+    symbol, _ = normalise_symbol(symbol_raw or name, name, exchange)
     return Transaction(date=when, side=side, units=abs(qty), price=abs(price),
                        symbol=symbol or "", name=name or symbol_raw)
 
@@ -258,6 +311,7 @@ def to_holdings(txns: list) -> list:
     for key, group in grouped.items():
         group.sort(key=lambda t: t.date)
         symbol, source = normalise_symbol(group[0].symbol, group[0].name)
+        symbol = group[0].symbol or symbol      # the suffix was resolved per-row already
         gross_buys = sum(t.value for t in group if t.side == BUY)
         holdings.append({
             "name": group[0].name or key,
@@ -282,10 +336,12 @@ def read_broker_csv(path: str) -> tuple:
         raise ImportError_(f"File not found: {path}")
     with open(path, encoding="utf-8-sig", errors="replace") as f:
         text = f.read()
-    txns, skipped, mapping, unmapped = read_transactions(text)
+    txns, skipped, mapping, unmapped, stats = read_transactions(text)
     holdings = to_holdings(txns)
     notes = {
         "transactions": len(txns),
+        "excluded_not_executed": stats["filtered_not_executed"],
+        "order_statuses_seen": stats["status_counts"],
         "holdings": len(holdings),
         "column_mapping": mapping,
         "ignored_columns": unmapped,

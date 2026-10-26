@@ -50,8 +50,11 @@ def test_decorated_headers_still_match():
 
 
 def test_unmapped_columns_are_reported_not_silently_dropped():
+    """Exchange IS mapped now (it picks the .NS/.BO suffix), so the leftovers are the
+    genuinely unused ones. A user should be able to see what was ignored."""
     _, unmapped = map_columns(["Date", "Qty", "Price", "Brokerage", "STT", "Exchange"])
-    assert set(unmapped) >= {"Brokerage", "STT", "Exchange"}
+    assert set(unmapped) >= {"Brokerage", "STT"}
+    assert "Exchange" not in unmapped
 
 
 # --- field parsing -------------------------------------------------------------------------
@@ -117,7 +120,7 @@ Trade Date,Stock Name,Symbol,Transaction Type,Quantity,Trade Price,Net Amount
 def test_banner_lines_before_the_header_are_skipped():
     """Broker exports prepend account banners. The header is found by looking for a row
     that maps to a date plus a quantity, not by assuming line 1."""
-    txns, skipped, mapping, _ = read_transactions(STATEMENT)
+    txns, skipped, mapping, _, _ = read_transactions(STATEMENT)
     assert len(txns) == 4
     assert skipped == []
     assert mapping["date"] == "Trade Date"
@@ -132,7 +135,7 @@ def test_a_file_with_no_recognisable_header_says_what_it_saw():
 def test_one_bad_row_does_not_cost_the_whole_import():
     bad = STATEMENT.replace("2025-05-02,Infosys,INFY,BUY,20,1500.00,30000.00",
                             "oops,Infosys,INFY,BUY,20,1500.00,30000.00")
-    txns, skipped, _, _ = read_transactions(bad)
+    txns, skipped, _, _, _ = read_transactions(bad)
     assert len(txns) == 3
     assert len(skipped) == 1 and "unreadable date" in skipped[0]
 
@@ -140,12 +143,12 @@ def test_one_bad_row_does_not_cost_the_whole_import():
 def test_price_is_derived_from_amount_when_absent():
     csv_text = ("Date,Symbol,Type,Quantity,Amount\n"
                 "2025-03-14,RELIANCE,BUY,10,12000\n")
-    txns, _, _, _ = read_transactions(csv_text)
+    txns, _, _, _, _ = read_transactions(csv_text)
     assert txns[0].price == 1200.0
 
 
 def test_transactions_group_into_holdings_largest_first():
-    txns, _, _, _ = read_transactions(STATEMENT)
+    txns, _, _, _, _ = read_transactions(STATEMENT)
     holdings = to_holdings(txns)
     assert [h["name"] for h in holdings] == ["Infosys", "Reliance Industries"]
     assert holdings[0]["symbol"] == "INFY.NS"
@@ -308,3 +311,107 @@ def test_a_file_that_is_neither_format_names_both_failures(tmp_path):
     msg = str(e.value)
     assert "missing required column" in msg
     assert "broker order statement" in msg
+
+
+# --- the real Groww export: order status and exchange ------------------------------------
+
+GROWW_HEADER = ["Stock name", "Symbol", "ISIN", "Type", "Quantity", "Value", "Exchange",
+                "Exchange Order Id", "Execution date and time", "Order status"]
+
+
+def _groww_tsv(rows):
+    return "\t".join(GROWW_HEADER) + "\n" + "\n".join("\t".join(r) for r in rows) + "\n"
+
+
+def test_the_real_groww_header_maps_and_derives_price_from_value():
+    """The actual export has no price column — price comes from Value / Quantity — and
+    the date column is 'Execution date and time', which only a containment match finds."""
+    m, _ = map_columns(GROWW_HEADER)
+    assert m["date"] == "Execution date and time"
+    assert m["symbol"] == "Symbol"          # not ISIN, which is also a synonym
+    assert m["name"] == "Stock name"
+    assert m["side"] == "Type"
+    assert m["quantity"] == "Quantity"
+    assert m["amount"] == "Value"
+    assert m["status"] == "Order status"
+    assert m["exchange"] == "Exchange"
+    assert "price" not in m                  # derived, not present
+
+
+def test_cancelled_and_failed_orders_are_excluded():
+    """A statement lists ORDERS, not trades. Importing a cancelled order gives the user a
+    position they never held — silently, and in a number they are likely to trust."""
+    tsv = _groww_tsv([
+        ["Reliance", "RELIANCE", "INE002A01018", "BUY", "10", "12000.00", "NSE", "O1",
+         "2026-03-14 09:20:11", "EXECUTED"],
+        ["Tata Steel", "TATASTEEL", "INE081A01020", "BUY", "50", "7500.00", "BSE", "O2",
+         "2026-04-02 11:00:00", "CANCELLED"],
+        ["Infosys", "INFY", "INE009A01021", "BUY", "20", "30000.00", "NSE", "O3",
+         "2026-05-02 13:30:00", "FAILED"],
+        ["Wipro", "WIPRO", "INE075A01022", "BUY", "5", "2500.00", "NSE", "O4",
+         "2026-06-01 10:00:00", "REJECTED"],
+    ])
+    txns, skipped, _, _, stats = read_transactions(tsv)
+
+    assert [t.symbol for t in txns] == ["RELIANCE.NS"]
+    assert stats["filtered_not_executed"] == 3
+    assert skipped == []                     # filtered, not failed to parse
+    assert stats["status_counts"]["CANCELLED"] == 1
+
+
+def test_the_exchange_column_picks_the_ticker_suffix():
+    """Verified against live data: TATASTEEL.BO and RELIANCE.BO both resolve, so a BSE
+    trade must not be labelled .NS."""
+    tsv = _groww_tsv([
+        ["Tata Steel", "TATASTEEL", "INE081A01020", "BUY", "50", "7500.00", "BSE", "O1",
+         "2026-04-02 11:00:00", "EXECUTED"],
+        ["Reliance", "RELIANCE", "INE002A01018", "BUY", "10", "12000.00", "NSE", "O2",
+         "2026-03-14 09:20:11", "EXECUTED"],
+    ])
+    txns, _, _, _, _ = read_transactions(tsv)
+    assert {t.symbol for t in txns} == {"TATASTEEL.BO", "RELIANCE.NS"}
+    assert normalise_symbol("TATASTEEL", exchange="BSE")[0] == "TATASTEEL.BO"
+    assert normalise_symbol("TATASTEEL", exchange="NSE")[0] == "TATASTEEL.NS"
+    assert normalise_symbol("TATASTEEL")[0] == "TATASTEEL.NS"      # unknown venue
+
+
+def test_an_unrecognised_status_is_kept_but_surfaced():
+    """Dropping a row because its status word is unfamiliar would lose a real trade
+    silently. Keep it, and report every status seen so the user can check."""
+    tsv = _groww_tsv([
+        ["Reliance", "RELIANCE", "INE002A01018", "BUY", "10", "12000.00", "NSE", "O1",
+         "2026-03-14 09:20:11", "PART TRADED"],
+    ])
+    txns, _, _, _, stats = read_transactions(tsv)
+    assert len(txns) == 1
+    assert stats["status_counts"]["PART TRADED"] == 1
+
+
+def test_a_file_of_only_cancelled_orders_says_so(tmp_path):
+    tsv = _groww_tsv([
+        ["Tata Steel", "TATASTEEL", "INE081A01020", "BUY", "50", "7500.00", "BSE", "O1",
+         "2026-04-02 11:00:00", "CANCELLED"],
+    ])
+    with pytest.raises(ImportError_) as e:
+        read_transactions(tsv)
+    assert "not executed" in str(e.value) and "CANCELLED" in str(e.value)
+
+
+def test_tab_separated_groww_export_imports_through_read_portfolio(tmp_path):
+    import agent
+    tsv = _groww_tsv([
+        ["Reliance", "RELIANCE", "INE002A01018", "BUY", "10", "12000.00", "NSE", "O1",
+         "2026-03-14 09:20:11", "EXECUTED"],
+        ["Reliance", "RELIANCE", "INE002A01018", "SELL", "4", "6800.00", "NSE", "O2",
+         "2026-08-11 10:05:00", "EXECUTED"],
+        ["Tata Steel", "TATASTEEL", "INE081A01020", "BUY", "50", "7500.00", "BSE", "O3",
+         "2026-04-02 11:00:00", "CANCELLED"],
+    ])
+    p = tmp_path / "groww.csv"
+    p.write_text(tsv, encoding="utf-8")
+    holdings, notes = agent.read_portfolio(str(p))
+
+    assert len(holdings) == 1                       # the cancelled order created nothing
+    assert holdings[0]["symbol"] == "RELIANCE.NS"
+    assert len(holdings[0]["transactions"]) == 2
+    assert holdings[0]["total_invested"] == 12000.00   # gross buys, sale not netted off
