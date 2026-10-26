@@ -103,8 +103,9 @@ OFFTOPIC_REDIRECT = (
 )
 
 REWRITE_SUMMARY = (
-    "Your summary reads as a recommendation (it tells the reader to buy, sell, exit, switch, "
-    "trim or add). Rewrite it to state only what the numbers show and what remains unknown. "
-    "Keep every figure exactly as it was. Reply with the rewritten summary as plain text and "
-    "nothing else."
+    "Your summary was rejected: {fault}. Rewrite it so it states ONLY what the tool "
+    "results showed and what remains unknown. Every figure must be one a tool actually "
+    "returned - do not compute, round differently, or introduce any new number - and it "
+    "must not tell the reader to buy, sell, exit, switch, trim or add. Reply with the "
+    "rewritten summary as plain text and nothing else."
 )

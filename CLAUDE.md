@@ -26,6 +26,15 @@ reconstructed, and it can express SELLS, which the SIP sheet cannot.
 - MF scheme names resolve to AMFI codes by splitting core/plan/option; contradicting the
   stated plan is penalised, never defaulted to Direct Growth.
 
+## Currency and benchmarks
+- Portfolio maths is in INR. Dollar-quoted holdings (US tickers, crypto pairs) are
+  converted in `_price_map` at each date's USD/INR rate - without it, units are
+  `rupees / dollar price`, which is a ratio rather than a share count, and the currency
+  move is invisible.
+- Beta uses the venue's own index: NIFTY 50 for `.NS`/`.BO`, S&P 500 otherwise. Join the
+  two series on calendar DATE, not the tz-aware timestamp, or nothing aligns across
+  markets.
+
 ## Data sources (all free)
 - Prices, indices, sector classification: yfinance
 - Mutual fund NAVs: AMFI daily NAV feed via mftool

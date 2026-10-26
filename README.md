@@ -301,6 +301,14 @@ built.
   still resolve wrongly — so the mapping is always shown rather than applied silently.
 - Fund overlap uses disclosed **top-10** holdings, so it *understates* true overlap;
   Indian MF full portfolios aren't on free APIs.
+- **Currency**: dollar-quoted holdings (US ETFs, crypto) are converted to rupees at each
+  date's own USD/INR rate, so values carry the currency move. If the FX feed is
+  unavailable the holding is still valued, at its unconverted price — a figure missing its
+  currency move rather than no figure at all, and the UI does not currently flag which it
+  got.
+- **Beta** is measured against the venue's own index (NIFTY 50 for `.NS`/`.BO`, S&P 500
+  otherwise). Crypto trades every day while the index does not, so only shared days are
+  used and its beta is a rough co-movement measure.
 - Risk-free rate (Sharpe) is a manually updated constant — no reliable free live source
   for the RBI 10Y G-Sec yield.
 - Free-tier cold start (~30s) — mitigated by a keep-warm ping and honest UI copy.

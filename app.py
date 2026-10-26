@@ -526,8 +526,12 @@ def page_ask() -> None:
         # History excludes the pending question — the backend appends it itself.
         history = [{"role": r, "content": t} for r, t, _ in ss.chat[:-1]]
         with st.spinner("Working…"):
-            code, data = call_json("POST", "/chat", cold_slot=slot,
-                                   json={"message": ss.pending, "history": history})
+            # Send the ACTIVE portfolio with the question. Without it the chat answered
+            # about the server's default while the dashboard showed yours.
+            payload = {"message": ss.pending, "history": history}
+            if ss.csv_text:
+                payload["portfolio_csv"] = ss.csv_text
+            code, data = call_json("POST", "/chat", cold_slot=slot, json=payload)
         slot.empty()
         answer = data.get("answer", "The backend is unreachable — give the free tier "
                                     "~30s and retry.")

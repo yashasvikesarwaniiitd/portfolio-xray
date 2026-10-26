@@ -180,15 +180,30 @@ async def chat(request: Request):
     ip = request.client.host if request.client else "unknown"
     if not _bump(ip, "chat", CHAT_LIMIT_PER_DAY):
         return _friendly_limit("chat turns", CHAT_LIMIT_PER_DAY)
+    # The chat used to ignore the user's portfolio entirely and answer about the server
+    # default, so the dashboard and the conversation beside it described different books.
+    # The CSV arrives in the JSON body (the frontend already holds it in session state),
+    # is validated the same way an upload is, and is deleted in the finally below.
+    csv_text = body.get("portfolio_csv")
+    temp_path = None
+    if csv_text:
+        try:
+            temp_path = _csv_to_temp(str(csv_text))
+        except ValueError as e:
+            return JSONResponse(status_code=400, content={"answer": str(e)})
     try:
         # answer_query routes first: advice/offtopic short-circuit before any tool runs.
-        result = agent.answer_query(client(), list(history), message, {})
+        result = agent.answer_query(client(), list(history), message, {},
+                                    path=temp_path or agent.DEFAULT_PORTFOLIO)
     except Exception:
         # Missing/invalid API key or upstream outage must degrade, not 500.
         return JSONResponse(status_code=503, content={
             "answer": "The analyst brain is unreachable right now (configuration or "
                       "upstream issue). The deterministic endpoints (/overview, /digest) "
                       "still work — or try again in a minute."})
+    finally:
+        if temp_path:
+            _quiet_unlink(temp_path)
     return {"answer": result["answer"], "category": result["category"],
             "refused": result["refused"], "tools_used": result["tools_used"]}
 

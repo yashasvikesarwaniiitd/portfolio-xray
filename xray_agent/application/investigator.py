@@ -330,23 +330,46 @@ class Investigator:
         one rewrite; if that still fails, we ship the verified findings as a fixed template.
         The user always gets something true, and never gets a recommendation."""
         summary = (state.summary or "").strip()
-        if summary and not policies.violates_guardrail(summary):
+        bad = self._summary_faults(state, summary)
+        if summary and not bad:
             return summary
 
-        if summary and policies.violates_guardrail(summary):
-            self.tracer.note(state, "summary read as advice — regenerating once")
+        if summary and bad:
+            self.tracer.note(state, f"summary rejected ({bad}) — regenerating once")
             try:
                 messages = messages + [
                     {"role": "user", "content": prompts.REWRITE_SUMMARY + "\n\n" + summary}]
                 resp = self._generate(state, messages, tools=None, max_tokens=700)
                 rewritten = (resp.text or "").strip()
-                if rewritten and not policies.violates_guardrail(rewritten):
+                if rewritten and not self._summary_faults(state, rewritten):
                     return rewritten
             except Exception as e:
                 state.errors.append(f"summary rewrite failed: {e}")
-            self.tracer.note(state, "rewrite still read as advice — using the fixed template")
+            self.tracer.note(state, "rewrite still faulty — using the fixed template")
 
         return self._template_summary(state)
+
+    def _summary_faults(self, state: RunState, text: str) -> str | None:
+        """Why this summary must not ship, or None.
+
+        Findings were verified number-by-number, but the SUMMARY that quotes them was only
+        ever screened for advice language — so a figure the verifier would have rejected
+        could still reach the user, just one layer further out. "Evidence or silence" has
+        to hold at the last step too, or it does not hold.
+
+        The pool here is the WHOLE ledger rather than one finding's citations: a summary
+        legitimately draws on everything the run established, and it cites nothing itself.
+        """
+        if policies.violates_guardrail(text):
+            return "reads as advice"
+        pool: set = set()
+        for ev in state.ledger.values():
+            if ev.ok:
+                pool |= set(ev.numbers)
+        unsourced = policies.unsupported_numbers(text, pool)
+        if unsourced:
+            return f"states numbers absent from the evidence: {', '.join(unsourced[:4])}"
+        return None
 
     @staticmethod
     def _template_summary(state: RunState) -> str:

@@ -281,3 +281,85 @@ def test_comma_grouped_amounts_are_read_as_one_number():
     assert not policies.numbers_are_honest("The portfolio rose to 999,999.99.", ev)
     # A comma-separated list is not a grouped number.
     assert policies.claimed_numbers("holdings 1, 2, 3") == ["1", "2", "3"]
+
+
+# =========================================================================================
+# Backend-review fixes: currency, benchmark selection, and the chat's tool surface.
+# =========================================================================================
+
+def test_dollar_denominated_instruments_are_identified():
+    """Portfolio maths is in rupees. A dollar-quoted holding that is not converted gives
+    units of `rupees invested / dollar price` — a ratio, not a share count — and hides the
+    currency move entirely."""
+    import agent
+    assert agent.is_usd_denominated("yfinance", "IVV")
+    assert agent.is_usd_denominated("crypto", "BTC-USD")
+    assert agent.is_usd_denominated("yfinance", "AAPL")
+    assert not agent.is_usd_denominated("yfinance", "RELIANCE.NS")
+    assert not agent.is_usd_denominated("yfinance", "TATASTEEL.BO")
+    assert not agent.is_usd_denominated("mftool", "122639")
+    assert not agent.is_usd_denominated("", "")
+
+
+def test_usd_prices_convert_at_each_date_s_own_rate(monkeypatch):
+    """Each day's price uses that day's rate, so the result carries the FX move rather
+    than a single snapshot rate applied to history."""
+    import agent
+    from datetime import date as _d
+    monkeypatch.setattr(agent, "_usdinr_map",
+                        lambda s, e: {_d(2026, 1, 1): 80.0, _d(2026, 6, 1): 90.0})
+    out = agent._to_inr({_d(2026, 1, 1): 100.0, _d(2026, 6, 1): 100.0},
+                        _d(2026, 1, 1), _d(2026, 6, 1))
+    assert out == {_d(2026, 1, 1): 8000.0, _d(2026, 6, 1): 9000.0}
+
+
+def test_a_missing_fx_feed_degrades_instead_of_losing_the_holding(monkeypatch):
+    """An FX outage must not make a US holding unpriceable — better a figure missing its
+    currency move than no figure at all, and the old behaviour was exactly that figure."""
+    import agent
+    from datetime import date as _d
+    monkeypatch.setattr(agent, "_usdinr_map", lambda s, e: {})
+    prices = {_d(2026, 1, 1): 100.0}
+    assert agent._to_inr(prices, _d(2026, 1, 1), _d(2026, 1, 1)) == prices
+
+
+def test_beta_picks_the_benchmark_that_matches_the_venue():
+    """Regressing everything on the NIFTY 50 silently failed for US and crypto holdings —
+    different trading calendars AND a different timezone on the index — which left 58% of
+    the sample's priced value with no risk figure at all."""
+    import agent
+    assert agent.benchmark_for("RELIANCE.NS") == (agent.NIFTY50_SYMBOL, "NIFTY 50")
+    assert agent.benchmark_for("TATASTEEL.BO") == (agent.NIFTY50_SYMBOL, "NIFTY 50")
+    assert agent.benchmark_for("IVV") == ("^GSPC", "S&P 500")
+    assert agent.benchmark_for("BTC-USD") == ("^GSPC", "S&P 500")
+
+
+def test_the_chat_agent_can_answer_do_i_own_the_same_thing_twice():
+    """The UI has always offered that chip while the chat had no tool that could answer
+    it — fund_overlap existed only inside the Investigator."""
+    import agent
+    names = {t["name"] for t in agent.TOOLS}
+    assert "fund_overlap" in names
+
+
+def test_every_portfolio_tool_accepts_the_portfolio_it_is_asked_about():
+    """The chat used to answer about the server default no matter what the user had
+    loaded, so the dashboard and the conversation beside it described different books."""
+    import inspect
+    import agent
+    for fn in (agent.run_tool, agent.turn, agent.answer_query, agent.answer_news,
+               agent.fetch_snapshot, agent.fetch_concentration, agent.fetch_fund_overlap,
+               agent.fetch_sharpe, agent.fetch_portfolio_xirr, agent.fetch_digest):
+        assert "path" in inspect.signature(fn).parameters, fn.__name__
+
+
+def test_run_tool_dispatches_to_the_portfolio_it_is_given(tmp_path):
+    import json as _j
+    import agent
+    a = tmp_path / "a.csv"
+    a.write_text("Mode,App,Type,Market,Risk,Where,symbol,source,Total Invested,Mar'25\n"
+                 "Equity,X,Share,India,Med,OnlyInA,RELIANCE.NS,yfinance,5000,5000\n",
+                 encoding="utf-8")
+    out, err = agent.run_tool("load_portfolio", {}, str(a))
+    assert not err
+    assert [h["name"] for h in _j.loads(out)["holdings"]] == ["OnlyInA"]

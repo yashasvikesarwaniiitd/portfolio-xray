@@ -258,6 +258,15 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "fund_overlap",
+        "description": "Pairwise overlap between the funds/ETFs held, from each fund's "
+                       "DISCLOSED TOP-10 holdings only — true overlap is likely higher, "
+                       "and Indian mutual funds do not publish holdings through free "
+                       "APIs, so many pairs come back unavailable. Answers 'do I own the "
+                       "same thing twice?'. Always state the top-10 basis when reporting.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "concentration",
         "description": "Portfolio concentration: weight of each holding by current value, HHI "
                        "(sum of squared weights) and effective number of holdings, weight by "
@@ -491,6 +500,58 @@ def load_portfolio(path: str = DEFAULT_PORTFOLIO) -> str:
 # The heavy lifting (math) lives in metrics.py as pure functions; the functions below
 # fetch data (mftool for funds, yfinance for stocks/ETFs/crypto) and orchestrate.
 
+USDINR_SYMBOL = "USDINR=X"
+_FX_CACHE: dict = {}
+
+
+def is_usd_denominated(source: str, symbol: str) -> bool:
+    """True for instruments quoted in dollars: US-listed tickers and crypto pairs."""
+    code = str(symbol or "").strip().upper()
+    if source == "crypto" or code.endswith("-USD"):
+        return True
+    if source != "yfinance" or not code:
+        return False
+    return not code.endswith((".NS", ".BO"))
+
+
+def _usdinr_map(start: date, end: date) -> dict:
+    """{date: USD/INR} over the window, cached per process. Empty on any failure."""
+    global _FX_CACHE
+    need = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+    if not all(d in _FX_CACHE for d in need[:1]):
+        try:
+            hist = yf.Ticker(USDINR_SYMBOL).history(
+                start=(start - timedelta(days=10)).isoformat(),
+                end=(end + timedelta(days=1)).isoformat())
+            for idx, v in hist["Close"].items():
+                if pd.notna(v):
+                    _FX_CACHE[idx.date()] = float(v)
+        except Exception:
+            pass
+    return _FX_CACHE
+
+
+def _to_inr(prices: dict, start: date, end: date) -> dict:
+    """Convert a USD price map to INR at each date's own rate.
+
+    Without this, units came out as `rupees invested / dollar price` - a dimensionless
+    ratio, not a share count (the sample showed 21.32 "shares" of IVV for Rs 12,000, which
+    would be $16,390). The reported VALUE still landed in the right ballpark because the
+    rupee investment cancels the exchange rate at purchase, so the return PERCENTAGE was
+    right and only the currency move was missing. Converting here fixes both: real share
+    counts, and a value that includes the FX gain or loss the investor actually bears.
+    """
+    fx = _usdinr_map(start, end)
+    if not fx:
+        return prices          # degrade to the old behaviour rather than fail the holding
+    out = {}
+    for d, px in prices.items():
+        rate = metrics.nav_on_or_before(fx, d, max_back=10)
+        if rate:
+            out[d] = px * rate
+    return out or prices
+
+
 def _price_map(source: str, symbol: str, start: date, end: date) -> dict:
     """Fetch a {date: price} map of closes/NAVs in [start, end]. yfinance for
     stocks/ETFs/crypto pairs, mftool historical NAV for mutual funds. Empty dict if none."""
@@ -501,7 +562,10 @@ def _price_map(source: str, symbol: str, start: date, end: date) -> dict:
             return {}
         # yfinance often appends today's date with a NaN close before data publishes;
         # drop NaNs so max(pmap) is a real trading day, not a NaN "latest price".
-        return {idx.date(): float(v) for idx, v in hist["Close"].items() if pd.notna(v)}
+        prices = {idx.date(): float(v) for idx, v in hist["Close"].items() if pd.notna(v)}
+        # Portfolio maths is in rupees; a dollar-quoted instrument must be converted or
+        # its units are not share counts and its currency move is invisible.
+        return _to_inr(prices, start, end) if is_usd_denominated(source, symbol) else prices
     if source == "mftool":
         raw = _mf().get_scheme_historical_nav(str(symbol))
         if not raw or not raw.get("data"):
@@ -792,8 +856,23 @@ def fetch_portfolio_xirr(path: str = DEFAULT_PORTFOLIO) -> str:
     })
 
 
-def fetch_beta(symbol: str, period: str = "2y") -> str:
-    """Beta = OLS slope of the holding's daily returns on NIFTY 50 daily returns."""
+def benchmark_for(symbol: str) -> tuple:
+    """(ticker, label) of the index this holding should be measured against.
+
+    Everything used to be regressed on the NIFTY 50, which quietly failed for anything not
+    listed in India: US ETFs and crypto share few NSE trading days, and their yfinance
+    indexes carry a different timezone, so the inner join produced almost no overlapping
+    rows and beta came back "not enough data". On the sample portfolio that silently left
+    58% of priced value with no risk figure at all.
+    """
+    code = str(symbol).strip().upper()
+    if code.endswith((".NS", ".BO")):
+        return NIFTY50_SYMBOL, "NIFTY 50"
+    return "^GSPC", "S&P 500"
+
+
+def fetch_beta(symbol: str, period: str = "2y", benchmark: str | None = None) -> str:
+    """Beta = OLS slope of the holding's daily returns on its benchmark's daily returns."""
     code = str(symbol).strip()
     if code.isdigit():  # numeric AMFI code -> a mutual fund
         return json.dumps({
@@ -801,24 +880,38 @@ def fetch_beta(symbol: str, period: str = "2y") -> str:
             "reason": "Beta versus an equity index is not applicable to mutual funds. "
                       "Provide a stock/ETF ticker (e.g. RELIANCE.NS).",
         })
+    bench_ticker, bench_label = (benchmark, benchmark) if benchmark else benchmark_for(code)
     stock_hist = yf.Ticker(code).history(period=period)
     if stock_hist.empty:
-        raise ValueError(f"No price data for '{code}' — check the ticker symbol.")
+        raise ValueError(f"No price data for '{code}' - check the ticker symbol.")
+    market_hist = yf.Ticker(bench_ticker).history(period=period)
+    if market_hist.empty:
+        raise ValueError(f"No data for the {bench_label} index.")
+
+    # Join on calendar DATE, not on the tz-aware timestamp. NSE closes are stamped IST and
+    # US closes ET, so an index-on-index join matched almost nothing even for days both
+    # venues traded - which is what made every cross-market beta fail.
     stock = stock_hist["Close"]
-    market = yf.Ticker(NIFTY50_SYMBOL).history(period=period)["Close"]
-    if market.empty:
-        raise ValueError("No data for the NIFTY 50 index.")
+    market = market_hist["Close"]
+    stock.index = pd.to_datetime(stock.index).tz_localize(None).normalize()
+    market.index = pd.to_datetime(market.index).tz_localize(None).normalize()
     joined = pd.concat([stock.rename("s"), market.rename("m")], axis=1, join="inner").dropna()
     rets = joined.pct_change().dropna()
     if len(rets) < 30:
-        raise ValueError("Not enough overlapping trading days to estimate beta.")
+        raise ValueError(
+            f"Not enough overlapping trading days between {code} and {bench_label} "
+            f"({len(rets)}) to estimate beta.")
     beta = metrics.regression_slope(rets["s"].tolist(), rets["m"].tolist())
-    return json.dumps({
+    out = {
         "symbol": code, "applicable": True, "beta": round(beta, 3),
-        "benchmark": "NIFTY 50", "period": period, "n_obs": len(rets),
-        "note": "Beta of the daily returns vs NIFTY 50: ~1 moves with the market, >1 more "
-                "volatile than the market, <1 less volatile. Historical, not a prediction.",
-    })
+        "benchmark": bench_label, "period": period, "n_obs": len(rets),
+        "note": f"Beta of the daily returns vs {bench_label}: ~1 moves with that index, "
+                ">1 more volatile, <1 less volatile. Historical, not a prediction.",
+    }
+    if code.upper().endswith("-USD"):
+        out["caveat"] = ("Crypto trades every day while the index does not, so only days "
+                         "both traded are used. Read this as a rough co-movement measure.")
+    return json.dumps(out)
 
 
 def _holding_series_and_value(h: dict, lookback_days: int = 370):
@@ -880,6 +973,18 @@ def fetch_sharpe(path: str = DEFAULT_PORTFOLIO) -> str:
                        "Holdings without >=150 days of daily history are excluded — see "
                        "holdings_covered and value_covered for coverage.",
     })
+
+
+def fetch_fund_overlap(path: str = DEFAULT_PORTFOLIO) -> str:
+    """Pairwise top-10 overlap. The UI has always offered the chip 'Do I own the same
+    thing twice?' while the chat agent had no tool that could answer it — the capability
+    existed only inside the Investigator."""
+    from report import data as report_data
+    holdings, _ = read_portfolio(path)
+    cache = report_data._load_cache()
+    out = report_data.section_overlap(holdings, cache)
+    report_data._save_cache(cache)
+    return json.dumps(out)
 
 
 def fetch_concentration(path: str = DEFAULT_PORTFOLIO) -> str:
@@ -1006,10 +1111,11 @@ def _sources_block(result: dict) -> str:
     return "Sources:\n" + "\n".join(lines) if lines else ""
 
 
-def answer_news(client, user_text: str, usage=None) -> str:
+def answer_news(client, user_text: str, usage=None,
+                path: str = DEFAULT_PORTFOLIO) -> str:
     """Evaluator-optimizer: fetch news, judge sufficiency, refetch ONCE with a broadened query
     if insufficient, then synthesise a cited answer. One refetch max bounds cost."""
-    query = _news_query_from_text(user_text)
+    query = _news_query_from_text(user_text, path)
     result = news.fetch_news(query)
     if not _news_sufficient(client, user_text, result, usage):
         # Optimizer step: broaden the query and try once more (never more — bounded cost).
@@ -1111,8 +1217,8 @@ def build_digest(path: str = DEFAULT_PORTFOLIO, news_top_n: int = 6) -> dict:
     }
 
 
-def fetch_digest() -> str:
-    return json.dumps(build_digest())
+def fetch_digest(path: str = DEFAULT_PORTFOLIO) -> str:
+    return json.dumps(build_digest(path))
 
 
 _SCHEME_CODES: dict | None = None  # AMFI code->name master list, fetched once per session
@@ -1222,7 +1328,12 @@ def fetch_price_history(ticker: str, period: str, max_points: int = 30) -> str:
     return json.dumps(out)
 
 
-def run_tool(name: str, args: dict) -> tuple[str, bool]:
+def run_tool(name: str, args: dict,
+             path: str = DEFAULT_PORTFOLIO) -> tuple[str, bool]:
+    """`path` is the portfolio this turn is about. It used to be implicit, so an
+    uploaded portfolio was analysed by /overview while the chat beside it kept
+    answering about the server default - the dashboard and the conversation
+    describing two different books."""
     try:
         if name == "get_price":
             return fetch_close(args["ticker"]), False
@@ -1233,9 +1344,9 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
         if name == "compare_returns":
             return fetch_compare(args["ticker_a"], args["ticker_b"], args["period"]), False
         if name == "load_portfolio":
-            return load_portfolio(), False
+            return load_portfolio(path), False
         if name == "portfolio_snapshot":
-            return fetch_snapshot(), False
+            return fetch_snapshot(path), False
         if name == "get_nav":
             return fetch_nav(args["fund_code"]), False
         if name == "search_fund":
@@ -1243,29 +1354,32 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
         if name == "price_history":
             return fetch_price_history(args["ticker"], args["period"]), False
         if name == "portfolio_xirr":
-            return fetch_portfolio_xirr(), False
+            return fetch_portfolio_xirr(path), False
         if name == "holding_units":
-            return fetch_holding_units(args["symbol"]), False
+            return fetch_holding_units(args["symbol"], path), False
         if name == "beta":
             return fetch_beta(args["symbol"]), False
         if name == "sharpe":
-            return fetch_sharpe(), False
+            return fetch_sharpe(path), False
         if name == "concentration":
-            return fetch_concentration(), False
+            return fetch_concentration(path), False
+        if name == "fund_overlap":
+            return fetch_fund_overlap(path), False
         if name == "get_news":
             return fetch_news_tool(args["query"]), False
         if name == "weekly_digest":
-            return fetch_digest(), False
+            return fetch_digest(path), False
         if name == "generate_health_report":
             from report import generate_report  # deferred: heavy deps load only when used
-            return json.dumps(generate_report()), False
+            return json.dumps(generate_report(path)), False
         return f"Unknown tool: {name}", True
     except Exception as e:
         return f"Error: {e}", True
 
 
 def turn(client: anthropic.Anthropic, messages: list, tools: list | None = None,
-         tools_used: list | None = None, usage=None) -> str:
+         tools_used: list | None = None, usage=None,
+         path: str = DEFAULT_PORTFOLIO) -> str:
     """Run the tool-calling loop until the model answers in text. `tools` defaults to the
     full tool set; pass [] for a no-tools turn (education). Tool names actually called are
     appended to `tools_used` if provided (used by the eval harness for tool-correctness).
@@ -1286,7 +1400,7 @@ def turn(client: anthropic.Anthropic, messages: list, tools: list | None = None,
             if block.type == "tool_use":
                 if tools_used is not None:
                     tools_used.append(block.name)
-                content, is_error = run_tool(block.name, block.input)
+                content, is_error = run_tool(block.name, block.input, path)
                 results.append({"type": "tool_result", "tool_use_id": block.id,
                                 "content": content, "is_error": is_error})
         messages.append({"role": "user", "content": results})
@@ -1299,7 +1413,8 @@ OFFTOPIC_REDIRECT = (
     "concentration), a fund's NAV, or a stock's price history."
 )
 def answer_query(client: anthropic.Anthropic, messages: list, user_text: str,
-                 state: dict | None = None, log: bool = True) -> dict:
+                 state: dict | None = None, log: bool = True,
+                 path: str = DEFAULT_PORTFOLIO) -> dict:
     """Route the query, then dispatch. `advice`/`offtopic` short-circuit before any tool runs;
     `news` fetches cited news (evaluator-optimizer refetch + synthesis); `education` answers
     with no tools; `analytics` runs the tool loop. `state` tracks the consecutive-refusal
@@ -1332,14 +1447,15 @@ def answer_query(client: anthropic.Anthropic, messages: list, user_text: str,
         return _finish({"category": category, "answer": OFFTOPIC_REDIRECT,
                         "tools_used": [], "refused": False})
     if category == "news":
-        answer = answer_news(client, user_text, usage=usage)
+        answer = answer_news(client, user_text, usage=usage, path=path)
         messages.append({"role": "assistant", "content": answer})
         return _finish({"category": category, "answer": answer,
                         "tools_used": ["get_news"], "refused": False})
 
     tools_used: list = []
     tools = [] if category == "education" else TOOLS  # education answers without tools
-    answer = turn(client, messages, tools=tools, tools_used=tools_used, usage=usage)
+    answer = turn(client, messages, tools=tools, tools_used=tools_used,
+                  usage=usage, path=path)
     return _finish({"category": category, "answer": answer, "tools_used": tools_used,
                     "refused": False})
 

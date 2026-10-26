@@ -501,3 +501,50 @@ def test_the_system_prompt_is_sent_as_a_cacheable_block():
     AnthropicLLM(_Client()).generate(system="SYS", messages=[], tools=[{"name": "t"}])
     assert sent["system"] == [{"type": "text", "text": "SYS",
                                "cache_control": {"type": "ephemeral"}}]
+
+
+def test_a_summary_quoting_an_unsourced_number_is_rejected():
+    """Findings were verified number-by-number, but the SUMMARY that quotes them was only
+    screened for advice language — so a figure the verifier would have thrown out could
+    still reach the user one layer further out. 'Evidence or silence' has to hold at the
+    last step too."""
+    tools = FakeTools({"attribute_move": MOVE})
+    agent_, _ = _agent([
+        classifies("analytics"),
+        calls(("attribute_move", WINDOW)),
+        calls(("record_finding", {"claim": "The portfolio fell 12450.5.",
+                                  "evidence_ids": ["E1"]})),
+        calls(("finish", {"summary": "The portfolio fell 12450.5, a 61.4% drawdown."})),
+        says("The portfolio fell 12450.5 over the window."),       # the forced rewrite
+    ], tools)
+    state = agent_.investigate("Why am I down?", "portfolio.sample.csv")
+
+    assert "61.4" not in state.summary          # the invented figure never ships
+    assert "12450.5" in state.summary           # the sourced one does
+
+
+def test_a_summary_rewrite_that_is_still_unsourced_falls_back_to_the_template():
+    tools = FakeTools({"attribute_move": MOVE})
+    agent_, _ = _agent([
+        classifies("analytics"),
+        calls(("attribute_move", WINDOW)),
+        calls(("record_finding", {"claim": "The portfolio fell 12450.5.",
+                                  "evidence_ids": ["E1"]})),
+        calls(("finish", {"summary": "Fell 12450.5, a 61.4% drawdown."})),
+        says("Still a 61.4% drawdown though."),                    # rewrite also unsourced
+    ], tools)
+    state = agent_.investigate("Why am I down?", "portfolio.sample.csv")
+
+    assert state.summary.startswith("Verified findings")
+    assert "61.4" not in state.summary
+
+
+def test_a_clean_summary_is_untouched():
+    tools = FakeTools({"attribute_move": MOVE})
+    agent_, _ = _agent([
+        classifies("analytics"),
+        calls(("attribute_move", WINDOW)),
+        calls(("finish", {"summary": "Market movement of -18200.0, not withdrawals."})),
+    ], tools)
+    state = agent_.investigate("Why am I down?", "portfolio.sample.csv")
+    assert state.summary == "Market movement of -18200.0, not withdrawals."
