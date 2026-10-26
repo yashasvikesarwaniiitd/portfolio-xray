@@ -33,6 +33,41 @@ DIY Indian retail investors with multi-app portfolios (stocks + mutual funds + E
 crypto) who want an honest X-ray of what they own — not a robo-adviser. Secondary
 audience: fintech teams evaluating how to ship LLM features inside a regulated boundary.
 
+## Getting your portfolio in
+
+Upload what your broker already gives you. The format is detected from the file's
+contents — there is nothing to fill in by hand.
+
+| Input | What it gives you |
+|---|---|
+| **Equity order statement** (Groww and similar) | Everything. Real trade dates, quantities and executed prices, so units are *read*, not inferred. Buys **and sells**. |
+| **Mutual fund statement** | Everything. Scheme names are resolved to AMFI codes automatically. |
+| **Monthly SIP sheet** (the original format) | Everything except sells, which the format cannot express. Units are reconstructed as `amount ÷ price-on-that-date`. |
+
+A statement is strictly better input than the SIP sheet: real fill prices beat
+"dated to the 1st of the month, priced at that day's close".
+
+**Four things it gets right that are easy to get wrong:**
+
+- **A statement lists *orders*, not trades.** Cancelled, rejected and failed rows sit in
+  the same file as executed ones; importing them hands the user positions they never held.
+  Those are excluded and counted. An *unrecognised* status is kept and surfaced — silently
+  dropping a real trade is the worse failure.
+- **Sale proceeds are a positive cashflow for XIRR.** Signing them like a purchase is the
+  classic bug that turns a profitable exit into a loss.
+- **Realised P&L is FIFO-matched**, because that is how Indian capital gains are assessed.
+  Units sold with no matching buy (a statement starting mid-history) are reported as
+  `unmatched_units`, never given a zero cost basis — that would invent profit equal to the
+  entire sale proceeds.
+- **Fund plan and option are honoured, not assumed.** AMFI's master list no longer carries
+  the Direct/Regular qualifier, so the scheme name is split into a searchable core plus the
+  plan and option, and candidates are scored against what the statement actually said.
+  Contradicting the stated plan is *penalised*: valuing a Regular-plan holder on the Direct
+  NAV gets the expense ratio wrong and corrupts every return number downstream.
+
+Every interpretation is reported back — the column mapping, rows skipped and why, orders
+excluded as not executed, and which AMFI code each scheme resolved to.
+
 ## Two layers: a routed workflow, and an agent
 
 Being precise about this, because the distinction is the interesting part.
@@ -225,8 +260,13 @@ default path for every question.
 
 ## Known limitations (honest)
 
-- Holdings listed after their SIP dates (e.g. recent IPOs) can't be unit-reconstructed
-  and are reported "unavailable" — ~₹37.7k of the sample author's real book.
+- On the **SIP-sheet** input, holdings listed after their SIP dates (e.g. recent IPOs)
+  can't be unit-reconstructed and are reported "unavailable" — ~₹37.7k of the sample
+  author's real book. A broker statement does not have this problem: units are read, not
+  inferred. It is a reason to prefer the statement, not a reason to distrust the number.
+- Fund-code resolution is a **name match**. It reports which code each scheme mapped to and
+  flags ties as ambiguous, but a fund whose name has changed, or one AMFI lists oddly, can
+  still resolve wrongly — so the mapping is always shown rather than applied silently.
 - Fund overlap uses disclosed **top-10** holdings, so it *understates* true overlap;
   Indian MF full portfolios aren't on free APIs.
 - Risk-free rate (Sharpe) is a manually updated constant — no reliable free live source
@@ -248,8 +288,9 @@ default path for every question.
    decides what is *worth* reporting and stays quiet when nothing moved.
 3. **Self-filing failures** — a rejected finding should append itself to the golden
    dataset; `CLAUDE.md` promises this and today it's manual.
-4. **CAS PDF ingestion** (one upload instead of CSV) and full-holdings overlap via AMC
-   factsheet parsing.
+4. **CAS PDF ingestion.** Broker CSV statements now import directly (equity and MF); a
+   consolidated CAS PDF would cover every AMC in one upload. Also full-holdings overlap
+   via AMC factsheet parsing, so overlap stops being top-10-only.
 5. **A sandboxed `run_analysis(python_code)` tool** — lifts the ceiling from 13 fixed
    tools to anything expressible in pandas, without breaking the no-arithmetic rule:
    the model writes code, Python still computes.

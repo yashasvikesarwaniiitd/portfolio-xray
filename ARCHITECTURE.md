@@ -60,6 +60,39 @@ rule is that it never acts.
 
 ---
 
+## 2a. Getting data in
+
+Three input formats, dispatched on content by `agent.read_portfolio`: a broker equity
+order statement, a mutual fund statement, and the original monthly SIP sheet.
+
+```
+file ──► SIP sheet?  ──yes──► reconstruct units: amount / price-on-the-1st
+          │ no (pandas rejects it, or required columns absent)
+          ▼
+        broker_import ──► synonym column map ──► transactions (date, side, units, price)
+          │                                        │
+          │                                        ├─ non-executed orders excluded
+          │                                        └─ NSE/BSE from the Exchange column
+          ▼
+        fund_resolver ──► scheme name ──► core + plan + option ──► AMFI code
+```
+
+`domain/transactions.py` holds the maths (FIFO realised P&L, signed position tracking,
+XIRR cashflows); `adapters/broker_import.py` does the parsing; `adapters/fund_resolver.py`
+makes the one network call, injectable so everything stays testable offline.
+
+**The design choice that kept this cheap:** rather than teach every metric a new type,
+`to_priced_flows` maps a transaction into the `{date, amount, price}` shape the engine
+already speaks, carrying a SELL as a **negative amount**. `metrics.units_held_at` divides
+amount by price, so negative amount yields negative units and position tracking through a
+sale works with no change to that function, to `attribute_move`, or to the timeline. The
+attribution identity survives untouched because its derivation only ever used units and
+prices — `V₁ − V₀ = u₀(p₁ − p₀) + (u₁ − u₀)p₁` holds whichever way units moved. Only the
+*label* changes: `new_money` becomes net of sale proceeds, so gross buys and sells are
+reported separately rather than letting a sale masquerade as lost market value.
+
+---
+
 ## 3. Layers and the dependency rule
 
 ```

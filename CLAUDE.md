@@ -13,6 +13,19 @@ via deterministic Python tools, and explains results with citations.
   orchestrates tools and explains.
 - Every metric tool is a pure function with unit tests before it becomes a tool.
 
+## Portfolio ingestion
+Three input formats, detected from file contents (`agent.read_portfolio` dispatches):
+broker equity order statements, mutual fund statements, and the original monthly SIP
+sheet. A statement is preferred — units are read from real fills rather than
+reconstructed, and it can express SELLS, which the SIP sheet cannot.
+- Non-executed orders (cancelled/rejected/failed) are excluded and counted. An
+  unrecognised status is KEPT and surfaced — dropping a real trade silently is worse.
+- Realised P&L is FIFO (Indian capital-gains basis). Sells with no matching buy are
+  reported as unmatched, never given a zero cost basis.
+- Sale proceeds are POSITIVE cashflows for XIRR.
+- MF scheme names resolve to AMFI codes by splitting core/plan/option; contradicting the
+  stated plan is penalised, never defaulted to Direct Growth.
+
 ## Data sources (all free)
 - Prices, indices, sector classification: yfinance
 - Mutual fund NAVs: AMFI daily NAV feed via mftool
