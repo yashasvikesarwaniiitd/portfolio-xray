@@ -1,10 +1,10 @@
 # Convenience targets. On Windows, run the underlying commands directly (they're 1-liners).
 
 test:            ## free, hermetic — what CI runs on every push
-	uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py -m "not regression" -q
+	uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py test_xray_agent_loop.py -m "not regression" -q
 
 test-regression: ## free, needs network (yfinance/AMFI)
-	uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py -m regression -q
+	uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py test_xray_agent_loop.py -m regression -q
 
 evals-full:      ## SPENDS API CREDITS (~Rs 5-10): live router/judge/insight evals + baseline
 	uv run pytest evals/ -q

@@ -93,3 +93,9 @@ def calls(*specs, input_tokens: int = 100, output_tokens: int = 50) -> LLMRespon
     return LLMResponse(stop_reason="tool_use", tool_calls=tool_calls,
                        assistant_content=content,
                        input_tokens=input_tokens, output_tokens=output_tokens)
+
+
+def classifies(category: str, reason: str = "scripted") -> LLMResponse:
+    """The router gate's turn. Every investigation starts with one, so every script does."""
+    return calls(("classify", {"category": category, "reason": reason}),
+                 input_tokens=40, output_tokens=15)
