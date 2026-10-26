@@ -130,7 +130,11 @@ def test_banner_lines_before_the_header_are_skipped():
 def test_a_file_with_no_recognisable_header_says_what_it_saw():
     with pytest.raises(ImportError_) as e:
         read_transactions("Alpha,Beta,Gamma\n1,2,3\n")
-    assert "Columns I saw" in str(e.value)
+    msg = str(e.value)
+    assert "does not look like a transaction report" in msg
+    # names the columns it DID find — the message is read by someone holding a file
+    # they did not design, so refusing without saying what was seen is useless
+    assert "Alpha, Beta, Gamma" in msg
 
 
 def test_one_bad_row_does_not_cost_the_whole_import():

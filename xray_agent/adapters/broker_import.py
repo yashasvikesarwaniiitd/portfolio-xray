@@ -220,9 +220,9 @@ def read_transactions(text: str) -> tuple:
                       if any(str(c).strip() for c in r)), [])
         seen = [h for h in first if str(h).strip()][:12]
         raise ImportError_(
-            "Could not find a transaction header row. I need at least a DATE column and a "
-            f"QUANTITY column. Columns I saw: {seen}. If your export names them something "
-            "else, tell me and I'll add the synonym.")
+            "This does not look like a transaction report. A transaction report needs at "
+            "least a date column and a quantity column, and this file has neither. "
+            f"The columns found were: {', '.join(str(c) for c in seen) or '(none)'}.")
 
     mapping, unmapped, rows, header_idx, _delimiter = best
     headers = rows[header_idx]

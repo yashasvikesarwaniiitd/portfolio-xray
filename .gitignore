@@ -11,3 +11,6 @@ xray.db
 *.xlsx
 report/.cache.json
 .streamlit/secrets.toml
+
+# local dev launch config (not part of the project)
+.claude/

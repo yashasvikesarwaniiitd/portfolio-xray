@@ -291,6 +291,12 @@ ss.setdefault("page", "ask")
 ss.setdefault("analysis", None)
 ss.setdefault("source_label", None)
 ss.setdefault("csv_text", None)      # user's own portfolio, held in memory only
+# Several named portfolios, so one person can compare their own book against a sample, a
+# spouse's, or a what-if. Held ONLY in this browser session: nothing is written server
+# side, which is what keeps the "nothing you upload is stored" promise true. They are
+# lost on refresh, and that is the trade being made deliberately.
+ss.setdefault("portfolios", {})      # name -> {csv_text, analysis, label}
+ss.setdefault("active", None)
 ss.setdefault("chat", [])
 ss.setdefault("queued", None)
 ss.setdefault("pending", None)   # question awaiting an answer (already shown in the thread)
@@ -304,10 +310,34 @@ MARKETS = ["India", "US", "Global"]
 RISKS = ["Low", "Med", "High"]
 
 
-def load_analysis(csv_text: str | None, label: str) -> None:
+def activate_portfolio(name: str) -> None:
+    """Point the rest of the app at one of the loaded portfolios. Everything downstream
+    still reads ss.analysis / ss.csv_text, so switching costs nothing and refetches
+    nothing — the analysis was already paid for when it was loaded."""
+    entry = ss.portfolios.get(name)
+    if not entry:
+        return
+    ss.active = name
+    ss.analysis = entry["analysis"]
+    ss.csv_text = entry["csv_text"]
+    ss.source_label = entry["label"]
+    ss.report = None
+    ss.chat = []            # a thread about one portfolio must not follow you to another
+
+
+def unique_name(base: str) -> str:
+    name = (base or "Portfolio").strip() or "Portfolio"
+    if name not in ss.portfolios:
+        return name
+    i = 2
+    while f"{name} ({i})" in ss.portfolios:
+        i += 1
+    return f"{name} ({i})"
+
+
+def load_analysis(csv_text: str | None, label: str, name: str | None = None) -> bool:
     slot = st.empty()
-    with st.spinner("Reconstructing units from your SIP history, then valuing at today's "
-                    "prices…"):
+    with st.spinner("Reading your transactions, then valuing them at today's prices…"):
         if csv_text:
             code, data = call_json("POST", "/analysis", cold_slot=slot,
                                    files={"file": ("portfolio.csv", csv_text.encode(),
@@ -316,12 +346,26 @@ def load_analysis(csv_text: str | None, label: str) -> None:
             code, data = call_json("GET", "/analysis", cold_slot=slot)
     slot.empty()
     if code == 200 and "snapshot" in data:
-        ss.analysis, ss.source_label, ss.csv_text = data, label, csv_text
-        ss.report = None
+        key = unique_name(name or label)
+        ss.portfolios[key] = {"csv_text": csv_text, "analysis": data, "label": label}
+        activate_portfolio(key)
         ss.page = "analysis"
-    else:
-        st.error(data.get("error", "The backend is unreachable — give the free tier ~30s "
-                                   "and try again."))
+        return True
+
+    # A rejected file is the most likely thing to go wrong, so say what was wrong with it
+    # rather than offering a generic failure.
+    msg = data.get("error") or ("The backend is unreachable — give the free tier ~30s "
+                                "and try again.")
+    st.error(msg)
+    if "transaction report" in msg or "missing required column" in msg:
+        st.info("**Portfolio X-Ray reads Groww transaction reports** — the equity order "
+                "report (Stock name / Symbol / Type / Quantity / Value / Execution date "
+                "and time / Order status) and the mutual fund report (Scheme Name / "
+                "Transaction Type / Units / NAV / Amount / Date). Export either from "
+                "Groww and upload it as-is. A holdings or P&L summary will not work: "
+                "without a date on every trade there is no way to compute XIRR or to "
+                "separate market movement from money you added.")
+    return False
 
 
 def rows_to_csv(df: pd.DataFrame) -> tuple[str, int]:
@@ -363,6 +407,36 @@ with st.sidebar:
             ss.page = key
             st.rerun()
 
+    if ss.portfolios:
+        st.markdown('<div class="rail-hr"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="rail-label">Portfolios</div>', unsafe_allow_html=True)
+        # Buttons, not st.radio. A radio keeps its own state under its key, that state
+        # beats the `index=` argument, and writing to the key to keep them in step raises
+        # StreamlitAPIException once the widget has been created earlier in the same run —
+        # which the rail always has. Buttons hold no state to fight, and they match the
+        # nav above.
+        for name in list(ss.portfolios):
+            if st.button(name, key=f"pf_{name}", use_container_width=True,
+                         type="primary" if name == ss.active else "secondary"):
+                activate_portfolio(name)
+                st.rerun()
+        # Once anything is loaded the big "Load the sample" card disappears, so without
+        # this there is no way to pull the sample in as a SECOND portfolio to compare
+        # your own book against — which is most of the point of having several.
+        if "Sample" not in ss.portfolios and st.button("＋ Add the sample", key="pf_add",
+                                                       use_container_width=True):
+            load_analysis(None, "Sample portfolio", name="Sample")
+            st.rerun()
+        if len(ss.portfolios) > 1 and st.button("Remove this one", key="pf_del",
+                                        use_container_width=True):
+            ss.portfolios.pop(ss.active, None)
+            activate_portfolio(next(iter(ss.portfolios)))
+            st.rerun()
+        st.markdown('<div style="font-size:11px;color:#948A80;margin-top:6px">'
+                    'Held in this browser session only — never uploaded anywhere or '
+                    'written to disk, and cleared when you close the tab.</div>',
+                    unsafe_allow_html=True)
+
     st.markdown('<div class="rail-hr"></div>', unsafe_allow_html=True)
     st.markdown('<div class="rail-label">At a glance</div>', unsafe_allow_html=True)
 
@@ -392,7 +466,7 @@ with st.sidebar:
                     'typing.</div></div>', unsafe_allow_html=True)
         if st.button("▶ Load the sample", key="rail_sample", use_container_width=True,
                      type="primary"):
-            load_analysis(None, "Sample portfolio")
+            load_analysis(None, "Sample portfolio", name="Sample")
             st.rerun()
 
     st.markdown('<div class="rail-foot">Educational only — not advice, not '
@@ -496,7 +570,7 @@ def page_analysis() -> None:
         st.write("")
         c1, c2 = st.columns([1, 3])
         if c1.button("▶ Load the sample", type="primary", use_container_width=True):
-            load_analysis(None, "Sample portfolio")
+            load_analysis(None, "Sample portfolio", name="Sample")
             st.rerun()
         if c2.button("Enter my own holdings", use_container_width=True):
             ss.page = "holdings"
@@ -775,7 +849,7 @@ def page_holdings() -> None:
     with c1:
         if st.button("Analyse my portfolio →", type="primary", use_container_width=True,
                      disabled=ready == 0):
-            load_analysis(csv_text, "Your portfolio (not stored)")
+            load_analysis(csv_text, "Entered by hand", name="Typed in")
             st.rerun()
     with c2:
         st.download_button("Blank template", data=csv_text if ready else
@@ -790,22 +864,32 @@ def page_holdings() -> None:
             ss.page = "analysis" if ss.analysis else "ask"
             st.rerun()
 
-    with st.expander("Paste or upload a full CSV instead (unlocks tier L2)"):
-        st.markdown('<div style="font-size:12.5px;color:#6E655C;line-height:1.6">'
-                    'Same columns as the template, plus one column per month named like '
-                    '<span class="mono">Mar\'25</span>, <span class="mono">April\'25</span>'
-                    ' … holding that month\'s SIP amount. That history is what lets units '
-                    'be reconstructed exactly (units = amount ÷ NAV on that date) instead '
-                    'of estimated.</div>', unsafe_allow_html=True)
-        up = st.file_uploader("CSV file", type=["csv"], key="up")
-        pasted = st.text_area("…or paste CSV text", height=120, key="paste")
-        if st.button("Analyse this CSV"):
+    with st.expander("Upload a Groww transaction report", expanded=True):
+        st.markdown(
+            '<div style="font-size:12.5px;color:#6E655C;line-height:1.6">'
+            'Export either report from Groww and upload it as-is — no editing, no '
+            'renaming columns.<br>'
+            '<b>Equity order report</b> — Stock name · Symbol · Type · Quantity · Value · '
+            'Execution date and time · Order status<br>'
+            '<b>Mutual fund report</b> — Scheme Name · Transaction Type · Units · NAV · '
+            'Amount · Date<br><br>'
+            'A <b>holdings</b> or <b>P&amp;L</b> summary will be rejected: with no date on '
+            'each trade there is no way to compute XIRR, or to tell a market fall apart '
+            'from money you simply did not add that month. The SIP sheet above still '
+            'works too.</div>', unsafe_allow_html=True)
+        up = st.file_uploader("Transaction report (.csv)", type=["csv"], key="up")
+        default_name = (up.name.rsplit(".", 1)[0].replace("_", " ")[:40]
+                        if up else "My portfolio")
+        pf_name = st.text_input("Name this portfolio", value=default_name, key="pf_name",
+                                help="Load several and switch between them in the sidebar.")
+        pasted = st.text_area("…or paste the report text", height=110, key="paste")
+        if st.button("Analyse this report", type="primary"):
             payload = (up.getvalue().decode("utf-8", "replace") if up
                        else (pasted or "").strip())
             if not payload:
-                st.warning("Upload or paste a CSV first.")
-            else:
-                load_analysis(payload, "Your portfolio (not stored)")
+                st.warning("Upload or paste a transaction report first.")
+            elif load_analysis(payload, pf_name.strip() or "My portfolio",
+                               name=pf_name.strip() or "My portfolio"):
                 st.rerun()
 
 
