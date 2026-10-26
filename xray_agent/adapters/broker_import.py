@@ -197,30 +197,34 @@ class ImportError_(ValueError):
 
 def read_transactions(text: str) -> tuple:
     """Parse statement text into (transactions, skipped_notes, mapping, unmapped)."""
-    try:
-        sample = text[:4096]
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-    except csv.Error:
-        dialect = csv.excel
-    rows = list(csv.reader(io.StringIO(text), dialect))
-    if not rows:
+    if not text.strip():
         raise ImportError_("The file is empty.")
 
-    # Broker exports often prepend title/account banner lines, so the header is the first
-    # row that actually maps to a date plus a quantity.
-    header_idx, mapping, unmapped = None, {}, []
-    for i, row in enumerate(rows[:20]):
-        candidate, unmapped_c = map_columns(row)
-        if "date" in candidate and "quantity" in candidate:
-            header_idx, mapping, unmapped = i, candidate, unmapped_c
-            break
-    if header_idx is None:
-        seen = [h for h in rows[0] if str(h).strip()][:12]
+    # csv.Sniffer is handed a sample that STARTS with banner text ("Groww Order
+    # Statement", an account line, a blank), finds no consistent delimiter, and falls back
+    # to comma - at which point a TAB-separated export parses as one column per line and
+    # the header is never found. A real Groww export hit exactly that. So do not ask it:
+    # try each delimiter and keep whichever yields a header row mapping the most fields.
+    # The parse validates its own delimiter.
+    best = None
+    for delim in (",", "	", ";", "|"):
+        rows = list(csv.reader(io.StringIO(text), delimiter=delim))
+        for i, row in enumerate(rows[:25]):
+            candidate, unmapped_c = map_columns(row)
+            if "date" in candidate and "quantity" in candidate:
+                if best is None or len(candidate) > len(best[0]):
+                    best = (candidate, unmapped_c, rows, i, delim)
+                break
+    if best is None:
+        first = next((r for r in csv.reader(io.StringIO(text))
+                      if any(str(c).strip() for c in r)), [])
+        seen = [h for h in first if str(h).strip()][:12]
         raise ImportError_(
             "Could not find a transaction header row. I need at least a DATE column and a "
             f"QUANTITY column. Columns I saw: {seen}. If your export names them something "
             "else, tell me and I'll add the synonym.")
 
+    mapping, unmapped, rows, header_idx, _delimiter = best
     headers = rows[header_idx]
     txns, skipped = [], []
     statuses: dict = {}

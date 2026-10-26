@@ -569,3 +569,99 @@ def test_an_mf_statement_imports_without_touching_the_network(tmp_path):
     assert len(holdings) == 1
     assert len(holdings[0]["transactions"]) == 2
     assert notes["unresolved_instruments"]      # honest: no code, so no price
+
+
+# --- the API upload path -------------------------------------------------------------------
+
+TAB_BANNER = ("Groww Order Statement\nAccount: XXXXX\n\n"
+              + "\t".join(GROWW_HEADER) + "\n"
+              + "\t".join(["Reliance", "RELIANCE", "INE002A01018", "BUY", "10", "12000.00",
+                           "NSE", "O1", "2026-03-14 09:20:11", "EXECUTED"]) + "\n")
+
+
+def test_a_tab_separated_export_with_banner_lines_is_detected():
+    """Regression. csv.Sniffer is handed a sample starting with banner text, cannot find a
+    consistent delimiter, and falls back to comma — at which point a TAB file parses as one
+    column per line and the header is never found. A real Groww export hit exactly this.
+    The delimiter is now chosen by which one actually maps a header."""
+    txns, _, mapping, _, _ = read_transactions(TAB_BANNER)
+    assert len(txns) == 1
+    assert mapping["quantity"] == "Quantity"
+    assert txns[0].symbol == "RELIANCE.NS"
+
+
+@pytest.mark.parametrize("delim", [",", "\t", ";", "|"])
+def test_every_supported_delimiter_round_trips(delim):
+    hdr = delim.join(["Trade Date", "Symbol", "Type", "Quantity", "Price"])
+    row = delim.join(["2026-03-14", "RELIANCE", "BUY", "10", "1200"])
+    txns, _, _, _, _ = read_transactions(f"Some Banner\n\n{hdr}\n{row}\n")
+    assert len(txns) == 1 and txns[0].units == 10
+
+
+def test_upload_validation_accepts_every_supported_format(tmp_path):
+    """_csv_to_temp used to run its OWN pd.read_csv, which raised ParserError (not a
+    ValueError, so it escaped the friendly-error path) on any statement with banner
+    lines. It now validates with the same parser the engine uses."""
+    import api
+    import agent
+    import os
+    sip = ("Mode,App,Type,Market,Risk,Where,symbol,source,Total Invested,Mar'25\n"
+           "Equity,Groww,Share,India,Med,Reliance,RELIANCE.NS,yfinance,5000,5000\n")
+    for label, text in [("tab statement", TAB_BANNER), ("sip sheet", sip),
+                        ("mf statement", _mf_tsv([
+                            ["Axis Midcap Fund Direct Growth", "Purchase", "10", "50",
+                             "500", "2026-01-05"]]))]:
+        path = api._csv_to_temp(text)
+        try:
+            holdings, _ = agent.read_portfolio(path, resolve_funds=False)
+            assert holdings, label
+        finally:
+            os.unlink(path)
+
+
+def test_upload_validation_rejects_junk_with_a_friendly_error():
+    import api
+    with pytest.raises(ValueError) as e:
+        api._csv_to_temp("Alpha,Beta\n1,2\n")
+    assert "missing required column" in str(e.value)
+
+
+def test_the_holdings_cap_counts_holdings_not_transactions():
+    """len(df) counted ROWS, so 120 trades in a single stock were rejected as
+    "120 holdings". A statement legitimately has far more rows than positions."""
+    import api
+    import agent
+    import os
+    many = ("Trade Date,Symbol,Type,Quantity,Price\n"
+            + "\n".join(f"2026-03-{(i % 28) + 1:02d},RELIANCE,BUY,1,1200"
+                        for i in range(api.HOLDINGS_CAP * 2)) + "\n")
+    path = api._csv_to_temp(many)          # must NOT raise
+    try:
+        holdings, _ = agent.read_portfolio(path, resolve_funds=False)
+        assert len(holdings) == 1
+    finally:
+        os.unlink(path)
+
+
+def test_the_holdings_cap_still_rejects_too_many_real_holdings():
+    import api
+    rows = "\n".join(f"2026-03-14,SYM{i},BUY,1,100" for i in range(api.HOLDINGS_CAP + 5))
+    with pytest.raises(ValueError) as e:
+        api._csv_to_temp("Trade Date,Symbol,Type,Quantity,Price\n" + rows + "\n")
+    assert "caps portfolios" in str(e.value)
+
+
+def test_validation_does_not_hit_the_network_for_fund_codes(monkeypatch):
+    """resolve_funds=False on the validation read: AMFI lookups belong in the endpoint
+    that actually values things, not in a size check that runs on every upload."""
+    import api
+    import os
+    from xray_agent.adapters import fund_resolver
+
+    def explode(*a, **kw):
+        raise AssertionError("validation must not resolve fund codes")
+
+    monkeypatch.setattr(fund_resolver, "resolve_holdings", explode)
+    path = api._csv_to_temp(_mf_tsv([
+        ["Axis Midcap Fund Direct Growth", "Purchase", "10", "50", "500", "2026-01-05"]]))
+    os.unlink(path)

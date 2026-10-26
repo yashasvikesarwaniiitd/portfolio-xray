@@ -369,7 +369,8 @@ def parse_month_label(label: str) -> tuple[int, int]:
     return 2000 + int(yy.strip()), _MONTHS[key]
 
 
-def _try_broker_statement(path: str, sip_failure: str) -> tuple:
+def _try_broker_statement(path: str, sip_failure: str,
+                          resolve_funds: bool = True) -> tuple:
     """Last resort before failing: read `path` as a broker order statement.
 
     Reached from BOTH ways the SIP parser can reject a file — pandas refusing it (banner
@@ -380,7 +381,7 @@ def _try_broker_statement(path: str, sip_failure: str) -> tuple:
     """
     try:
         from xray_agent.adapters.broker_import import read_broker_csv
-        holdings, notes = read_broker_csv(path)
+        holdings, notes = read_broker_csv(path, resolve_funds=resolve_funds)
     except Exception as broker_error:
         raise ValueError(
             f"{sip_failure} It also could not be read as a broker order statement "
@@ -398,7 +399,8 @@ def _try_broker_statement(path: str, sip_failure: str) -> tuple:
     return holdings, [note] + extra
 
 
-def read_portfolio(path: str = DEFAULT_PORTFOLIO) -> tuple[list[dict], list[str]]:
+def read_portfolio(path: str = DEFAULT_PORTFOLIO,
+                   resolve_funds: bool = True) -> tuple[list[dict], list[str]]:
     """Parse the portfolio CSV into holdings. Returns (holdings, skipped_row_notes).
 
     No network I/O, so it is unit-testable. Preserves each holding's source/symbol/category
@@ -415,14 +417,16 @@ def read_portfolio(path: str = DEFAULT_PORTFOLIO) -> tuple[list[dict], list[str]
         # A broker statement often carries banner lines above the header, so it is not a
         # rectangular CSV and pandas rejects it outright. That is a SIGNAL to try the
         # statement importer, not a reason to give up — the importer finds its own header.
-        return _try_broker_statement(path, f"Could not read '{path}' as CSV: {e}")
+        return _try_broker_statement(path, f"Could not read '{path}' as CSV: {e}",
+                                     resolve_funds)
     # Header may carry a BOM, embedded newlines, or doubled spaces — normalise whitespace.
     df.columns = [" ".join(str(c).replace("﻿", "").split()) for c in df.columns]
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         return _try_broker_statement(
             path,
-            f"Portfolio file is missing required column(s): {', '.join(missing)}.")
+            f"Portfolio file is missing required column(s): {', '.join(missing)}.",
+            resolve_funds)
 
     month_cols = [c for c in df.columns if "'" in c]  # monthly SIP-inflow columns
     holdings, skipped = [], []

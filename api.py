@@ -11,14 +11,12 @@ Public-hardening (non-negotiable):
 
 Run: uv run uvicorn api:app --host 0.0.0.0 --port 8000
 """
-import io
 import os
 import sqlite3
 import tempfile
 from datetime import date
 
 import anthropic
-import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -94,16 +92,35 @@ async def kill_switch(request: Request, call_next):
 # --- portfolio input handling ------------------------------------------------------------
 
 def _csv_to_temp(csv_text: str) -> str:
-    """Validate an uploaded/pasted portfolio CSV (holdings cap) and park it in a temp file
-    for this request only. Raises ValueError with a friendly message."""
-    df = pd.read_csv(io.StringIO(csv_text))
-    if len(df) > HOLDINGS_CAP:
-        raise ValueError(f"That's {len(df)} rows — this demo caps portfolios at "
-                         f"{HOLDINGS_CAP} holdings.")
+    """Park an uploaded portfolio in a temp file for this request, and validate it the way
+    the engine will actually read it.
+
+    This used to run its own pd.read_csv and cap on len(df), which was wrong twice over
+    once broker statements became a supported input. A statement carries banner lines
+    above the header, so it is not rectangular and pandas raised a ParserError that was
+    not a ValueError and so escaped the friendly-error path. And len(df) counts
+    TRANSACTIONS, so a hundred trades in a single stock was rejected as "100 holdings".
+
+    Writing the file first and asking read_portfolio means one parser decides what the
+    file is, for every supported format. `resolve_funds=False` keeps this validation
+    network-free — AMFI lookups happen once, in the endpoint that actually values things.
+    """
     f = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False,
                                     encoding="utf-8")
     f.write(csv_text)
     f.close()
+    try:
+        holdings, _ = agent.read_portfolio(f.name, resolve_funds=False)
+    except ValueError as e:
+        os.unlink(f.name)
+        raise ValueError(str(e))
+    except Exception as e:                     # never a 500 because of a user's file
+        os.unlink(f.name)
+        raise ValueError(f"Couldn't read that file: {e}")
+    if len(holdings) > HOLDINGS_CAP:
+        os.unlink(f.name)
+        raise ValueError(f"That's {len(holdings)} holdings — this demo caps portfolios "
+                         f"at {HOLDINGS_CAP}.")
     return f.name
 
 
