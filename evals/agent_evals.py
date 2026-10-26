@@ -99,11 +99,9 @@ def _tools_for(case):
     return tools
 
 
-def run_case(case, llm, verbose: bool) -> dict:
+def run_case(case, llm, verbose: bool, budget: Budget) -> dict:
     tools = _tools_for(case)
-    agent = Investigator(llm, tools,
-                         budget=Budget(max_steps=12, max_cost_inr=10.0, max_seconds=120.0),
-                         today=TODAY)
+    agent = Investigator(llm, tools, budget=budget, today=TODAY)
     state = agent.investigate(case["question"], case["portfolio"])
 
     called = [ev.tool for ev in state.ledger.values()]
@@ -170,6 +168,9 @@ def main() -> int:
                    help="groq is free but rate limited; expect retries")
     p.add_argument("--model", default=None)
     p.add_argument("--retries", type=int, default=6)
+    p.add_argument("--max-steps", type=int, default=12)
+    p.add_argument("--max-seconds", type=float, default=None,
+                   help="default 120s on anthropic, 400s on groq (slower tier)")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--out", default=os.path.join(os.path.dirname(__file__),
                                                  "agent_baseline.md"))
@@ -181,6 +182,9 @@ def main() -> int:
         return 2
 
     cases = [c for c in CASES if not args.case or c["id"] in args.case]
+    budget = Budget(max_steps=args.max_steps, max_cost_inr=10.0,
+                    max_seconds=args.max_seconds or
+                    (400.0 if args.provider == "groq" else 120.0))
     llm = build_llm(args.provider, args.model, retries=args.retries,
                     verbose=args.verbose)
     if args.provider == "groq":
@@ -191,7 +195,7 @@ def main() -> int:
     for c in cases:
         print(f"running {c['id']} ...", flush=True)
         try:
-            rows.append(run_case(c, llm, args.verbose))
+            rows.append(run_case(c, llm, args.verbose, budget))
         except Exception as e:
             rows.append({"id": c["id"], "pass": False, "failures": [f"crashed: {e}"],
                          "outcome": "CRASH", "steps": 0, "cost_inr": 0.0, "elapsed_s": 0.0,

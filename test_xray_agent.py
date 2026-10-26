@@ -264,3 +264,20 @@ def test_index_names_are_not_read_as_claimed_numbers():
     # The carve-out is narrow: a real unsourced figure beside an index name still fails.
     assert not policies.numbers_are_honest("Beta is 1.34 against the NIFTY 50, down 7.2%.", ev)
     assert policies.claimed_numbers("Beta 1.34 vs NIFTY 50") == ["1.34"]
+
+
+def test_comma_grouped_amounts_are_read_as_one_number():
+    """Regression from the first live Groq run: the model wrote "175,490.87" and the
+    scanner read it as 175 and 490.87, so a correct finding was rejected and a turn was
+    wasted restating it unformatted. Money is written with separators by every human and
+    most models, in both Western (175,490.87) and Indian (1,75,490.87) grouping."""
+    ev = {"value_start": 175490.87, "value_end": 177535.72, "change": 2044.84}
+    assert policies.numbers_are_honest(
+        "The portfolio rose from 175,490.87 to 177,535.72, a change of 2,044.84.", ev)
+    assert policies.numbers_are_honest("It rose to 1,77,535.72.", ev)   # Indian grouping
+    assert policies.claimed_numbers("from 175,490.87 to 1,77,535.72") == \
+        ["175,490.87", "1,77,535.72"]
+    # Still strict: a grouped number that is NOT in the evidence is still caught.
+    assert not policies.numbers_are_honest("The portfolio rose to 999,999.99.", ev)
+    # A comma-separated list is not a grouped number.
+    assert policies.claimed_numbers("holdings 1, 2, 3") == ["1", "2", "3"]

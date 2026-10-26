@@ -116,6 +116,10 @@ def run_investigate(args) -> int:
         print("[provider] groq: inference is free, so the cost budget is inert — steps "
               f"({budget.max_steps}) and wall clock ({budget.max_seconds:.0f}s) are the "
               "only runaway guards.", file=sys.stderr)
+        if budget.max_seconds <= 120:
+            print("[provider] groq's free tier is slow and rate limited; the wall clock is "
+                  "checked BEFORE each model call, so one slow call can overrun it. Pass "
+                  "--max-seconds 400 for a run you want to finish.", file=sys.stderr)
 
     agent = Investigator(llm, tools, tracer=_build_tracer(args.trace, args.verbose),
                          store=SqliteRunStore(), budget=budget, today=today)

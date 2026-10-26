@@ -83,10 +83,17 @@ def planned_calls(path: str, today: date) -> list[tuple[str, dict]]:
     jobs += [("beta", {"symbol": t}) for t in tickers]
     jobs += [("beta", {"symbol": t, "period": "2y"}) for t in tickers]
     jobs += [("price_history", {"ticker": t, "period": p})
-             for t in tickers for p in ("1mo", "6mo")]
+             for t in tickers for p in ("1mo", "3mo", "6mo")]
     jobs += [("compare_returns", {"ticker_a": t, "ticker_b": "^NSEI", "period": "6mo"})
              for t in tickers]
     jobs += [("get_news", {"query": n}) for n in names]
+
+    # A model will reasonably pass the HOLDING NAME where the schema says ticker - the
+    # first live Groq run did exactly that and took a replay miss for it. These calls fail
+    # against the real provider too, but recording the failure means replay reproduces the
+    # same actionable error the model would get live, instead of a "not recorded" dead end.
+    jobs += [("price_history", {"ticker": n, "period": "1mo"}) for n in names]
+    jobs += [("beta", {"symbol": n}) for n in names]
     return jobs
 
 

@@ -26,7 +26,16 @@ _IMPERATIVE = re.compile(
 _SAFE_CONTEXT = re.compile(
     r"\b(?:sell-?off|overbought|oversold|buyback|sell-side|buy-side)\b", re.IGNORECASE)
 
-_NUM = re.compile(r"-?\d+(?:\.\d+)?")
+# Matches grouped numbers BEFORE plain ones, so "175,490.87" is read as one figure and not
+# as 175 and 490.87. Both groupings are allowed: Western 175,490.87 and Indian 1,75,490.87
+# (groups of two). Without this the verifier rejects any finding that formats money the way
+# a human would — found when a model on Groq wrote the amount with separators and had a
+# perfectly good finding thrown out, then had to waste a turn restating it unformatted.
+_NUM = re.compile(r"-?\d{1,3}(?:,\d{2,3})+(?:\.\d+)?|-?\d+(?:\.\d+)?")
+
+
+def _as_float(token: str) -> float:
+    return float(token.replace(",", ""))
 
 # Numerals that are part of a NAME, not a claim about the portfolio. "The NIFTY 50 fell"
 # states one number, not two, but a naive scan reads the 50 as an unsourced figure and
@@ -64,7 +73,7 @@ def json_numbers(obj) -> set:
     if isinstance(obj, (int, float)):
         out.add(float(obj))
     elif isinstance(obj, str):
-        out.update(float(m) for m in _NUM.findall(obj))
+        out.update(_as_float(m) for m in _NUM.findall(obj))
     elif isinstance(obj, dict):
         for k, v in obj.items():
             out |= json_numbers(k)
@@ -106,7 +115,7 @@ def unsupported_numbers(text: str, pool) -> list[str]:
     """Which numerals in `text` are NOT backed by `pool`. Powers an actionable rejection
     message, so the model is told exactly which figure to drop rather than just 'no'."""
     return [n for n in claimed_numbers(text)
-            if not _matches_pool(float(n), _decimals(n), pool)]
+            if not _matches_pool(_as_float(n), _decimals(n), pool)]
 
 
 def verify_finding(finding, ledger) -> tuple[bool, str | None]:
