@@ -35,23 +35,28 @@ eval asserts this directly: the **same question over two different portfolios mu
 different tool sequences** (`divergence_check` in `evals/agent_evals.py`). If they ever match,
 the agent is following a script and the claim in this section is false.
 
-> **Measured status: PASSES on `claude-haiku-5-5` and on `claude-haiku-4-5`, FAILS on
-> `openai/gpt-oss-120b`** (Groq free tier). See [`evals/agent_baseline.md`](evals/agent_baseline.md).
+> **Measured status: diverged in 4 of 5 runs, and the claim is weaker than it first
+> looked.** See [`evals/agent_baseline.md`](evals/agent_baseline.md).
 >
-> | portfolio | tools the agent chose (Haiku 5.5) | steps |
-> |---|---|---|
-> | `sample` (6 holdings, spread) | `attribute_move` | 3 |
-> | `demo_b` (46% in one bank) | `load_portfolio → attribute_move → portfolio_snapshot → get_news` | 5 |
+> | run | `sample` (spread) | `demo_b` (46% one bank) | verdict |
+> |---|---|---|---|
+> | Haiku 4.5 | 3 tools | 8 tools | PASS |
+> | Haiku 5.5 #1 | 1 | 4 | PASS |
+> | Haiku 5.5 #2 | 1 | 1 | **FAIL** |
+> | Haiku 5.5 #3 | 1 | 2 | PASS |
+> | Haiku 5.5 #4 | **3** | **2** | PASS (inverted) |
 >
-> The concentrated book earned a wider investigation: having seen one holding dominate, the
-> agent went looking for what else it held and what was being said about it. The diversified
-> book needed one call. Nothing in the loop encodes that difference — it came from the
-> evidence. Haiku 4.5 showed the same shape more verbosely (3 calls against 8).
+> The tool sequence varies more between RUNS than between PORTFOLIOS, and run #4 inverted
+> the direction entirely — the diversified book used more tools than the concentrated one.
+> So the earlier write-up here, that "the concentrated book earned a wider investigation",
+> was reading one sample of a stochastic process as a stable property. It is not one.
 >
-> On `gpt-oss-120b` both portfolios produced the identical `attribute_move → get_news →
-> get_news`. So adaptation is a property of the **agent plus a capable model**, not of the
-> scaffolding alone, and the honest claim is exactly that. The test discriminating between
-> two models is the test working.
+> What the evidence still supports: the loop does not fix the order, the model picks it,
+> and `openai/gpt-oss-120b` produced the SAME sequence on both portfolios every time while
+> Haiku varies. What it does not support is a claim of consistent, evidence-driven
+> adaptation — that needs repeated runs and a pass RATE, which the harness does not yet
+> compute. Building that is the honest next step; quoting the one run that looked best
+> would not be.
 
 What it is **not**: there is no multi-agent fan-out, no autonomous scheduling, no persistent
 memory between runs. Those are on the ladder in §8, not in the code. The agency here is in

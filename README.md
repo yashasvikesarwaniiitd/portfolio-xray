@@ -214,7 +214,7 @@ case that passes today still passes on Monday. Full table in
 | Check | Result |
 |---|---|
 | Heavy cases on `claude-haiku-5-5` | **3/3 passed** (incl. fault injection: `beta` broken on purpose → the agent routed to `sharpe` rather than inventing a number) |
-| **Tool-sequence divergence** | **PASS** on Haiku 5.5 — the spread portfolio took 1 tool call, the 46%-in-one-bank portfolio took 4, adding `load_portfolio`, `portfolio_snapshot` and `get_news`. Also passed on Haiku 4.5 (3 calls vs 8). **FAILS** on `openai/gpt-oss-120b`, where both produced the same sequence. |
+| **Tool-sequence divergence** | **Diverged in 4 of 5 runs** (1v4, 1v1 ✗, 1v2, 3v2, and 3v8 on Haiku 4.5). The sequences vary more between *runs* than between *portfolios*, and on one run the diversified book used more tools than the concentrated one — so this does **not** currently support a claim of consistent adaptation. On `openai/gpt-oss-120b` both portfolios produced the same sequence every time. See the caveat below. |
 | Light cases on Groq free tier | passed |
 
 The divergence check is the one that makes *"this is an agent, not a script"* falsifiable:

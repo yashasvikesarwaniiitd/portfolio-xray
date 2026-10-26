@@ -246,6 +246,13 @@ def divergence_check(rows: list) -> tuple:
     two different portfolios must produce different tool sequences, because the evidence
     differs. Identical sequences mean the model is following a script.
 
+    KNOWN WEAKNESS, measured: this compares ONE sample of a stochastic process. Across
+    five observed runs the pair diverged four times and matched once, and on one run the
+    DIVERSIFIED portfolio used more tools than the concentrated one - so the sequences
+    vary more between runs than they do between portfolios. A single PASS is therefore
+    weak evidence of adaptation and a single FAIL is weak evidence against it. Reading
+    this honestly needs repeated runs and a pass RATE, which this harness does not yet do.
+
     Returns one of PASS / FAIL / N-A. N-A when the pair did not both run, or ran on
     different providers — in which case any difference could be the model rather than the
     portfolio, and reporting a pass would claim something the run cannot support.
