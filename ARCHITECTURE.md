@@ -151,7 +151,7 @@ reported separately rather than letting a sale masquerade as lost market value.
 Arrows point inward. `domain/` imports nothing but the standard library and `metrics.py`
 (itself pure, network-free math). `application/` depends on `domain` and `ports`, never on
 an adapter. That is what lets the entire loop be tested with a scripted model and canned
-tools — **395 hermetic tests, no network, no API key**.
+tools — **403 hermetic tests, no network, no API key**.
 
 An honest caveat, since updated by events: `ports/llm.py` was written as a **test seam,
 not provider independence** — `assistant_content` is handed back verbatim, so its shape was

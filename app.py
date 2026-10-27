@@ -747,15 +747,6 @@ ss.setdefault("save_note", None)         # why the last auto-save did not happen
 ss.setdefault("chat", [])
 ss.setdefault("queued", None)
 ss.setdefault("pending", None)   # question awaiting an answer (already shown in the thread)
-ss.setdefault("report", None)
-ss.setdefault("rows", pd.DataFrame([
-    {"Holding name": "", "Symbol / AMFI code": "", "Type": "Share", "Market": "India",
-     "Risk": "Med", "Amount invested ₹": None} for _ in range(4)]))
-
-TYPES = ["Share", "ETF", "Mutual Fund", "Crypto", "Basket"]
-MARKETS = ["India", "US", "Global"]
-RISKS = ["Low", "Med", "High"]
-
 
 def activate_portfolio(name: str) -> None:
     """Point the rest of the app at one of the loaded portfolios.
@@ -766,7 +757,8 @@ def activate_portfolio(name: str) -> None:
     The chat is cleared on purpose. A thread is about one book: carrying "your biggest
     position is Reliance at 26%" over to a portfolio that does not hold Reliance would
     put stale figures under a new heading, and the model would answer follow-ups from
-    them. The report is dropped for the same reason.
+    them. A health report is NOT dropped on a switch: it belongs to its portfolio (see
+    `entry["report"]`), so switching away and back finds it where it was.
     """
     entry = ss.portfolios.get(name)
     if not entry:
@@ -775,7 +767,6 @@ def activate_portfolio(name: str) -> None:
     ss.analysis = entry["analysis"]
     ss.csv_text = entry["csv_text"]
     ss.source_label = entry["label"]
-    ss.report = None
     ss.chat = []
 
 
@@ -916,7 +907,6 @@ def remove_portfolio(key: str) -> None:
             ss.analysis = None
             ss.csv_text = None
             ss.source_label = None
-            ss.report = None
             ss.chat = []
 
 
@@ -934,28 +924,11 @@ def open_saved(row: dict) -> bool:
     return load_analysis(got["csv_text"], "Saved portfolio", name=got["name"], pid=got["id"])
 
 
-def rows_to_csv(df: pd.DataFrame) -> tuple[str, int]:
-    """Turn the entry grid into our real CSV schema. `source` is INFERRED (numeric code →
-    mftool, crypto type → crypto, any other symbol → yfinance, no symbol → manual) so the
-    user never has to know about data providers."""
-    header = ("Mode,App,Type,Market,Risk,Where,symbol,source,"
-              "Estimated Returns (3Y),Total Invested\n")
-    lines, n = [], 0
-    for _, r in df.iterrows():
-        name = str(r.get("Holding name") or "").strip()
-        amount = r.get("Amount invested ₹")
-        if not name or amount in (None, "") or pd.isna(amount):
-            continue
-        sym = str(r.get("Symbol / AMFI code") or "").strip()
-        typ = str(r.get("Type") or "Share").strip()
-        source = ("mftool" if sym.isdigit() else "crypto" if typ == "Crypto"
-                  else "yfinance" if sym else "manual")
-        safe_name = name.replace(",", " ")
-        lines.append(f"Equity,Manual,{typ},{r.get('Market') or 'India'},"
-                     f"{r.get('Risk') or 'Med'},{safe_name},{sym},{source},-,"
-                     f"{float(amount):.0f}")
-        n += 1
-    return header + "\n".join(lines) + "\n", n
+SIP_TEMPLATE = (
+    "Mode,App,Type,Market,Risk,Where,symbol,source,Estimated Returns (3Y),Total Invested,"
+    "Mar'25,April'25\n"
+    "Equity,Groww,Share,India,Med,Reliance Industries,RELIANCE.NS,yfinance,-,15000,"
+    "5000,10000\n")
 
 
 # ---------------------------------------------------------------- the upload dialog
@@ -997,6 +970,12 @@ def upload_dialog() -> None:
         st.caption("A Groww equity or mutual-fund transaction report, or the SIP sheet, as "
                    "CSV or Excel (.xlsx). An Excel workbook can have several sheets; every "
                    "one that looks like a portfolio is read.")
+        # The blank template used to live on the "Enter my holdings" page. That page is gone
+        # - uploading covers it - but someone building a file by hand still needs the
+        # columns, so the template is offered here, where the file is chosen.
+        st.download_button("Download a blank SIP template", data=SIP_TEMPLATE,
+                           file_name="portfolio_template.csv", mime="text/csv",
+                           icon=":material/download:", key="dlg_template")
         return
     text, note, err = read_upload(f)
     if err:
@@ -1080,7 +1059,7 @@ with st.sidebar:
     st.write("")
     nav = [("ask", "Ask the analyst", ":material/forum:"),
            ("analysis", "Portfolio analysis", ":material/space_dashboard:"),
-           ("holdings", "Enter my holdings", ":material/edit_note:")]
+           ("report", "Health report", ":material/summarize:")]
     for key, label, icon in nav:
         if st.button(label, key=f"nav_{key}", icon=icon, use_container_width=True,
                      type="primary" if ss.page == key else "secondary"):
@@ -1312,13 +1291,11 @@ def page_analysis() -> None:
                     'SIP history — enough to show concentration, overlap and exact XIRR.'
                     '</div></div>', unsafe_allow_html=True)
         st.write("")
-        c1, c2 = st.columns([1, 3])
+        c1, _ = st.columns([1, 3])
         if c1.button("Load the sample", type="primary", use_container_width=True):
             if load_analysis(None, "Sample portfolio", name="Sample"):
                 st.rerun()
-        if c2.button("Enter my own holdings", use_container_width=True):
-            ss.page = "holdings"
-            st.rerun()
+        st.caption("Or use Upload in the left sidebar to add your own CSV or Excel file.")
         return
 
     a = ss.analysis
@@ -1635,8 +1612,16 @@ def page_analysis() -> None:
             if code == 200:
                 prog.write("Writing guarded AI insights…")
                 prog.update(label="Report ready", state="complete")
-                # Keep header lookups case-insensitive: servers send them lowercased.
-                ss.report = (content, requests.structures.CaseInsensitiveDict(headers))
+                # Kept ON THE PORTFOLIO it was built for, so the Health report tab can list
+                # every report built this session and switching portfolios does not lose
+                # one. Header lookups are case-insensitive: servers send them lowercased.
+                h = requests.structures.CaseInsensitiveDict(headers)
+                entry = ss.portfolios.get(ss.active)
+                if entry is not None:
+                    entry["report"] = {
+                        "content": content, "level": h.get("X-Report-Level", "?"),
+                        "cost": h.get("X-Report-Cost-INR", "?"),
+                        "built_at": time.strftime("%d %b, %H:%M")}
             else:
                 prog.update(label="Report failed", state="error")
                 try:
@@ -1648,112 +1633,139 @@ def page_analysis() -> None:
         if st.button("Ask about this", use_container_width=True):
             ss.page = "ask"
             st.rerun()
-    if ss.report:
-        content, headers = ss.report
-        st.download_button("Download Portfolio_Health_Report.xlsx", data=content,
-                           file_name="Portfolio_Health_Report.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument."
-                                "spreadsheetml.sheet",
-                           icon=":material/download:")
-        st.caption(f"Input tier {headers.get('X-Report-Level', '?')} · AI insight cost "
-                   f"₹{headers.get('X-Report-Cost-INR', '?')} · every insight is "
-                   f"checked: no buy/sell language, and every number must exist in the "
-                   f"computed section data.")
-
-
-# ---------------------------------------------------------------- page: holdings
-
-def page_holdings() -> None:
-    page_header("Enter your holdings",
-                "Type them here, or paste a CSV. Nothing is saved anywhere — the file "
-                "lives in memory for one request.",
-                "Max 60 holdings")
-
-    st.markdown(
-        '<div class="card" style="display:flex;gap:12px 26px;align-items:center;'
-        'flex-wrap:wrap;padding:16px 20px"><div style="font-size:13px;color:var(--ink3);'
-        'max-width:220px;line-height:1.5">What each column is for — only the first and '
-        'last are required:</div><div>'
-        '<span class="tag">Holding name</span>'
-        '<span class="tag">Symbol / AMFI code</span>'
-        '<span class="tag">Type</span>'
-        '<span class="tag">Market</span>'
-        '<span class="tag">Risk</span>'
-        '<span class="tag">Amount invested ₹</span></div></div>',
-        unsafe_allow_html=True)
-    st.write("")
-
-    edited = st.data_editor(
-        ss.rows, num_rows="dynamic", use_container_width=True, key="editor",
-        column_config={
-            "Holding name": st.column_config.TextColumn(
-                width="large", help="e.g. Parag Parikh Flexi Cap, or Reliance Industries"),
-            "Symbol / AMFI code": st.column_config.TextColumn(
-                help="Ticker for stocks/ETFs (RELIANCE.NS, IVV) or the 6-digit AMFI code "
-                     "for a mutual fund (122639). Leave blank for an unpriceable basket."),
-            "Type": st.column_config.SelectboxColumn(options=TYPES, required=False),
-            "Market": st.column_config.SelectboxColumn(options=MARKETS, required=False),
-            "Risk": st.column_config.SelectboxColumn(
-                options=RISKS, help="Your own label — used for the risk-tier split."),
-            "Amount invested ₹": st.column_config.NumberColumn(
-                format="%d", min_value=0, help="Total you've put in."),
-        })
-    ss.rows = edited
-
-    csv_text, ready = rows_to_csv(edited)
-    st.markdown(
-        f'<div style="font-size:13px;color:var(--ink3);line-height:1.6;margin-top:8px">'
-        f'<span class="mono ink">{ready}</span> of '
-        f'<span class="mono ink">{len(edited)}</span> rows usable. Amounts alone give you '
-        f'tier <span class="mono ink">L1</span> — allocation, diversification, '
-        f'concentration and overlap. To unlock exact values, XIRR and risk '
-        f'(<span class="mono ink">L2</span>) you need month-by-month SIP amounts, which '
-        f'the paste box below accepts.</div>', unsafe_allow_html=True)
-    st.write("")
-
-    c1, c2, c3 = st.columns([1.3, 1, 1.4])
-    with c1:
-        if st.button("Analyse my portfolio →", type="primary", use_container_width=True,
-                     disabled=ready == 0):
-            if load_analysis(csv_text, "Your portfolio", name="Typed holdings"):
-                persist(ss.active)
+    rep = (ss.portfolios.get(ss.active) or {}).get("report")
+    if rep:
+        d1, d2, _ = st.columns([1.3, 1.1, 1.6])
+        with d1:
+            st.download_button("Download Portfolio_Health_Report.xlsx", data=rep["content"],
+                               file_name=_report_filename(ss.active),
+                               mime=XLSX_MIME, icon=":material/download:",
+                               key="dl_analysis")
+        with d2:
+            if st.button("View in Health report", icon=":material/summarize:",
+                         use_container_width=True, key="goto_report"):
+                ss.page = "report"
                 st.rerun()
-    with c2:
-        st.download_button("Blank template", data=csv_text if ready else
-                           "Mode,App,Type,Market,Risk,Where,symbol,source,"
-                           "Estimated Returns (3Y),Total Invested,Mar'25,April'25\n"
-                           "Equity,Groww,Share,India,Med,Reliance Industries,"
-                           "RELIANCE.NS,yfinance,-,15000,5000,10000\n",
-                           file_name="portfolio_template.csv", mime="text/csv",
-                           icon=":material/download:", use_container_width=True)
-    with c3:
-        if st.button("Cancel", use_container_width=True):
-            ss.page = "analysis" if ss.analysis else "ask"
-            st.rerun()
+        st.caption(f"Input tier {rep['level']} · AI insight cost ₹{rep['cost']} · every "
+                   f"insight is checked: no buy/sell language, and every number must exist "
+                   f"in the computed section data.")
 
-    with st.expander("Paste or upload a full CSV or Excel file instead (unlocks tier L2)"):
-        st.markdown('<div style="font-size:13px;color:var(--ink2);line-height:1.6">'
-                    'Same columns as the template, plus one column per month named like '
-                    '<span class="mono">Mar\'25</span>, <span class="mono">April\'25</span>'
-                    ' … holding that month\'s SIP amount. That history is what lets units '
-                    'be reconstructed exactly (units = amount ÷ NAV on that date) instead '
-                    'of estimated.</div>', unsafe_allow_html=True)
-        up = st.file_uploader("CSV or Excel file", type=["csv", "xlsx", "xlsm"], key="up")
-        pasted = st.text_area("…or paste CSV text", height=120, key="paste")
-        if st.button("Analyse this CSV"):
-            payload, up_err = None, None
-            if up:
-                payload, _note, up_err = read_upload(up)
-            else:
-                payload = (pasted or "").strip()
-            if up_err:
-                st.error(up_err)
-            elif not payload:
-                st.warning("Upload a file or paste a CSV first.")
-            else:
-                if load_analysis(payload, "Your portfolio", name="Pasted CSV"):
-                    persist(ss.active)
-                    st.rerun()
+
+# ---------------------------------------------------------------- page: health report
+
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _report_filename(name: str | None) -> str:
+    """One file per portfolio, named for it - two downloads must not both be called
+    Portfolio_Health_Report.xlsx and overwrite each other in the Downloads folder."""
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name or "")).strip("_") or "Portfolio"
+    return f"{safe}_Health_Report.xlsx"
+
+
+def page_report() -> None:
+    """Every health report built this session, one card per portfolio.
+
+    The report is an Excel file, which used to make it opaque: a download button and a
+    caption, and no way to see what it said without saving it and opening Excel. Each card
+    now shows the report's own executive summary - read back out of the workbook, which is
+    the only place those findings exist - beside the figures the dashboard already holds, with
+    the download beside them.
+
+    It populates only from reports that have actually been built; nothing is generated here,
+    because building one takes a server round trip and, with the AI narration, a few rupees.
+    Reports live in this browser session, like the portfolios they belong to, and are NOT
+    saved to the database: each holds an entire portfolio's contents and the findings are
+    cheap to regenerate. A portfolio that is updated loses its report, since it would now
+    describe a portfolio that no longer exists.
+    """
+    import report_view
+
+    page_header("Health report",
+                "The Excel reports you have built, one per portfolio, and what each found.")
+    built = [(k, e) for k, e in ss.portfolios.items() if e.get("report")]
+    waiting = [k for k, e in ss.portfolios.items() if not e.get("report")]
+
+    if not built:
+        st.markdown(
+            '<div class="card"><div class="sec-t">No health report yet</div>'
+            '<div style="font-size:14px;color:var(--ink2);line-height:1.6;margin-top:6px">'
+            'A health report is a multi-sheet Excel workbook: allocation, diversification, '
+            'concentration, sector exposure, fund overlap, risk, cost and a ranked list of '
+            'questions to think about, each with a plain-English reading guide. Build one '
+            'from <b>Portfolio analysis</b> and it will appear here with its findings and '
+            'the download.</div></div>', unsafe_allow_html=True)
+        st.write("")
+        if ss.analysis:
+            if st.button("Go to Portfolio analysis", type="primary", key="rep_go_analysis"):
+                ss.page = "analysis"
+                st.rerun()
+        elif st.button("Load the sample", type="primary", key="rep_load_sample"):
+            if load_analysis(None, "Sample portfolio", name="Sample"):
+                st.rerun()
+        return
+
+    for i, (key, entry) in enumerate(built):
+        rep = entry["report"]
+        a = entry["analysis"]
+        div = (a.get("sections") or {}).get("diversification") or {}
+        score = report_view.score(rep["content"])
+        findings = report_view.findings(rep["content"])
+        sheets = report_view.sections(rep["content"])
+
+        stats = [("Holdings", a.get("holdings_total", "—")),
+                 ("Effective bets", div.get("effective_holdings", "—")),
+                 ("Score", f"{score:.0f}/100" if score is not None else "—"),
+                 ("Input tier", rep["level"])]
+        chips = "".join(
+            f'<div style="min-width:96px"><div class="k-label">{_html.escape(str(k))}</div>'
+            f'<div class="mono" style="font-size:20px;color:var(--ink1);margin-top:2px">'
+            f'{_html.escape(str(v))}</div></div>' for k, v in stats)
+        bullets = "".join(
+            f'<li style="margin:0 0 8px">{_html.escape(t)}</li>' for t in findings) or (
+            '<li class="muted">This report has no written summary.</li>')
+        st.markdown(
+            f'<div class="card" style="margin-bottom:6px">'
+            f'<div style="display:flex;justify-content:space-between;align-items:baseline;'
+            f'gap:12px;flex-wrap:wrap"><div class="sec-t">{_html.escape(key)}</div>'
+            f'<div class="sec-s">built {_html.escape(rep["built_at"])} · AI insight cost '
+            f'₹{_html.escape(str(rep["cost"]))}</div></div>'
+            f'<div style="display:flex;gap:28px;flex-wrap:wrap;margin:14px 0 4px">{chips}</div>'
+            f'<div class="rail-hr" style="margin:14px 0"></div>'
+            f'<div class="k-label">What it found</div>'
+            f'<ul style="font-size:14px;color:var(--ink2);line-height:1.6;margin:8px 0 0;'
+            f'padding-left:20px">{bullets}</ul>'
+            f'<div class="note" style="margin-top:14px">{len(sheets)} sheets: '
+            f'{_html.escape(" · ".join(sheets))}</div></div>', unsafe_allow_html=True)
+        c1, c2, _ = st.columns([1.5, 1.1, 2])
+        with c1:
+            st.download_button("Download Excel report", data=rep["content"],
+                               file_name=_report_filename(key), mime=XLSX_MIME,
+                               icon=":material/download:", key=f"dl_report_{i}",
+                               use_container_width=True)
+        with c2:
+            if st.button("Open portfolio", key=f"open_report_{i}", use_container_width=True,
+                         icon=":material/space_dashboard:"):
+                activate_portfolio(key)
+                ss.page = "analysis"
+                st.rerun()
+        st.write("")
+
+    if waiting:
+        st.markdown('<div class="sec-t" style="margin:8px 0 8px">Not built yet</div>',
+                    unsafe_allow_html=True)
+        for j, key in enumerate(waiting):
+            c1, c2 = st.columns([3, 1.4])
+            c1.markdown(f'<div style="padding-top:8px;color:var(--ink2)">'
+                        f'{_html.escape(key)}</div>', unsafe_allow_html=True)
+            if c2.button("Build report", key=f"build_report_{j}", use_container_width=True):
+                activate_portfolio(key)
+                ss.page = "analysis"
+                st.rerun()
+
+    st.caption("Reports are kept for this browser session only and are not saved with your "
+               "portfolios. Updating a portfolio removes its report, since it would no longer "
+               "describe it.")
 
 
 # ---------------------------------------------------------------- render
@@ -1765,7 +1777,7 @@ if ss.flash:
     ss.flash = None
     {"success": st.success, "warning": st.warning}.get(_kind, st.info)(_text)
 
-{"ask": page_ask, "analysis": page_analysis, "holdings": page_holdings}[ss.page]()
+{"ask": page_ask, "analysis": page_analysis, "report": page_report}.get(ss.page, page_ask)()
 
 code, stats = call_json("GET", "/stats")
 if code == 200 and stats.get("queries"):

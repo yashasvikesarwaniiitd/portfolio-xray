@@ -14,15 +14,35 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-NAVY = "#1F3A5F"; TEAL = "#2E8B8B"; GOLD = "#C9962A"; SLATE = "#64748B"
-RED = "#C0392B"; GREEN = "#1E8449"
+# Portfolio X-Ray palette (light "paper" variant of the app's identity). The old names are
+# kept so every chart function reads the same: NAVY = ink, TEAL = data blue, GOLD = amber.
+NAVY = "#0B0C0E"; TEAL = "#2F86C8"; GOLD = "#C98A12"; SLATE = "#6B727B"
+RED = "#D2462A"; GREEN = "#5E8C00"
 plt.rcParams.update({
-    "font.family": "DejaVu Sans", "font.size": 11, "axes.edgecolor": "#D5DBE1",
-    "axes.labelcolor": NAVY, "axes.titlesize": 13, "axes.titleweight": "bold",
-    "axes.titlecolor": NAVY, "xtick.color": "#22303C", "ytick.color": "#22303C",
+    "font.family": "DejaVu Sans", "font.size": 11, "axes.edgecolor": "#D5D9DE",
+    "axes.labelcolor": "#22262D", "axes.titlesize": 13, "axes.titleweight": "bold",
+    "axes.titlecolor": NAVY, "xtick.color": "#22262D", "ytick.color": "#22262D",
     "figure.facecolor": "white", "axes.facecolor": "white"})
 
-PALETTE = [TEAL, NAVY, GOLD, "#7FB3B3", "#9AA8BD", "#D9C08A", "#B9C7C7"]
+PALETTE = [TEAL, "#BC8424", "#8F7EF0", "#22A88A", "#E0685A", "#9AA1A9", "#C9CED4"]
+
+
+def _entity_color(name: str, i: int) -> str:
+    """Same colour per market / asset class as the app, so a slice never changes colour."""
+    n = str(name).lower()
+    if "gold" in n or "silver" in n:
+        return "#E0685A"
+    if n.startswith("mf"):
+        return "#22A88A"
+    if "crypto" in n or "global" in n:
+        return "#8F7EF0"
+    if "india" in n:
+        return "#BC8424"
+    if n == "us" or n.endswith(" us"):
+        return "#3B9BE0"
+    if n in ("other", "unknown") or "other" in n:
+        return "#9AA1A9"
+    return PALETTE[i % len(PALETTE)]
 
 
 def _save(fig, outdir: str, name: str) -> str:
@@ -43,7 +63,7 @@ def render_gauge(score: float, outdir: str):
         return None
     fig, ax = plt.subplots(figsize=(4.2, 2.6), subplot_kw={"aspect": "equal"})
     ax.pie([score, 100 - score], startangle=90, counterclock=False,
-           colors=[TEAL, "#E7ECF0"], wedgeprops=dict(width=0.32))
+           colors=[TEAL, "#E9ECEF"], wedgeprops=dict(width=0.32))
     ax.text(0, 0.05, f"{score:.0f}", ha="center", va="center", fontsize=30,
             fontweight="bold", color=NAVY)
     ax.text(0, -0.28, "/100", ha="center", va="center", fontsize=11, color=SLATE)
@@ -58,7 +78,7 @@ def render_alloc(pairs: list, outdir: str):
     fig, ax = plt.subplots(figsize=(6.2, 3.6))
     vals = [v for _, v in pairs]
     labs = [f"{n}\n{v:.0f}%" for n, v in pairs]
-    ax.pie(vals, labels=labs, colors=PALETTE, startangle=90, counterclock=False,
+    ax.pie(vals, labels=labs, colors=[_entity_color(n, i) for i, (n, _) in enumerate(pairs)], startangle=90, counterclock=False,
            wedgeprops=dict(width=0.42), textprops={"fontsize": 9.5})
     ax.set_title("By asset class")
     return _save(fig, outdir, "alloc")
@@ -71,7 +91,7 @@ def render_geo(pairs: list, outdir: str):
     fig, ax = plt.subplots(figsize=(5.6, 3.4))
     vals = [v for _, v in pairs]
     labs = [f"{n}  {v:.0f}%" for n, v in pairs]
-    ax.pie(vals, labels=labs, colors=[TEAL, NAVY, GOLD] + PALETTE[3:], startangle=90,
+    ax.pie(vals, labels=labs, colors=[_entity_color(n, i) for i, (n, _) in enumerate(pairs)], startangle=90,
            counterclock=False, textprops={"fontsize": 10})
     ax.set_title("By geography")
     return _save(fig, outdir, "geo")

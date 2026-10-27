@@ -25,23 +25,26 @@ import agent
 import logger
 from report import charts, data, insights
 
-NAVY = "1F3A5F"; TEAL = "2E8B8B"; LIGHT = "F4F6F8"; INK = "22303C"
+# Portfolio X-Ray palette — the app's obsidian / chartreuse / ice identity in a light
+# "paper" variant, because a workbook is printed and read in Excel's own light chrome.
+NAVY = "0B0C0E"; TEAL = "1C2026"; LIGHT = "F4F5F7"; INK = "22262D"   # names kept for callers
 F_H1 = Font(name="Calibri", bold=True, size=15, color="FFFFFF")
-F_SUB = Font(name="Calibri", size=10, italic=True, color="FFFFFF")
+F_SUB = Font(name="Calibri", size=10, italic=True, color="D9DEE3")
 F_H2 = Font(name="Calibri", bold=True, size=12, color=NAVY)
 F_KPI = Font(name="Calibri", bold=True, size=24, color=NAVY)
-F_KPI_L = Font(name="Calibri", bold=True, size=10, color=TEAL)
+F_KPI_L = Font(name="Calibri", bold=True, size=10, color="5E656E")
 F_BODY = Font(name="Calibri", size=10, color=INK)
-F_MUTE = Font(name="Calibri", size=9, italic=True, color="7F8C8D")
+F_MUTE = Font(name="Calibri", size=9, italic=True, color="6B727B")
 F_NOTE = Font(name="Calibri", size=10, color=INK)
-F_AI = Font(name="Calibri", size=10, color="26326B")
+F_AI = Font(name="Calibri", size=10, color="1D4F73")
 FILL_H = PatternFill("solid", fgColor=NAVY)
 FILL_SUB = PatternFill("solid", fgColor=TEAL)
 FILL_NOTE = PatternFill("solid", fgColor=LIGHT)
-FILL_GOOD = PatternFill("solid", fgColor="EAF7EF")
-FILL_AI = PatternFill("solid", fgColor="ECEFF9")
-_thin = Side(style="thin", color="D5DBE1")
+FILL_GOOD = PatternFill("solid", fgColor="F2F9DC")
+FILL_AI = PatternFill("solid", fgColor="EAF4FB")
+_thin = Side(style="thin", color="E1E4E8")
 BORD = Border(left=_thin, right=_thin, top=_thin, bottom=_thin)
+BAR_ACCENT = Border(bottom=Side(style="medium", color="D4FF3F"))  # chartreuse rule under each banner
 
 CHART_ROWS = 16  # vertical rows a chart zone reserves (reference constant)
 
@@ -99,6 +102,7 @@ def banner(ws, title, what_it_tells):
     s.font = F_SUB; s.fill = FILL_SUB
     for col in range(1, 13):
         ws.cell(row=3, column=col).fill = FILL_SUB
+        ws.cell(row=3, column=col).border = BAR_ACCENT
     ws.row_dimensions[3].height = 18
     return 5
 
@@ -116,8 +120,8 @@ def table(ws, r0, headers, rows, col0=2):
 
 def note_box(ws, r0, title, lines, fill, font, icon):
     ws.merge_cells(start_row=r0, start_column=2, end_row=r0, end_column=11)
-    t = ws.cell(row=r0, column=2, value=f"{icon}  {title}")
-    t.font = Font(bold=True, size=10, color=NAVY if fill != FILL_AI else "26326B")
+    t = ws.cell(row=r0, column=2, value=title)  # icon kept in the signature, not drawn
+    t.font = Font(bold=True, size=10, color=NAVY if fill != FILL_AI else "1D4F73")
     t.fill = fill
     for col in range(2, 12):
         ws.cell(row=r0, column=col).fill = fill
@@ -201,10 +205,7 @@ def _sheet_diversification(ws, sec, ch, ai):
     r = good_looks(ws, r, "A balanced shape touches every axis. Shapes with a zero axis have "
                           "a blind spot that shows up in drawdowns.")
     t = table(ws, r, ["Metric", "Value", "Plain English"], [
-        ("Actual holdings", sec.get("holdings_held", sec["holdings_count"]),
-         "lines in your portfolio"),
-        ("Weighted holdings", sec["holdings_count"],
-         "lines the figures below are computed over"),
+        ("Actual holdings", sec["holdings_count"], "lines in your portfolio"),
         ("HHI", sec["hhi"], "concentration index (lower = more spread)"),
         ("Effective holdings", sec["effective_holdings"],
          "how many independent bets they act like"),
@@ -345,7 +346,7 @@ def _sheet_questions(ws, sec, ch, ai):
         or [("—", "No flagged questions this run — the computed findings sit inside every "
                   "comfort line used in this report.", "—")]
     t = table(ws, r, ["Priority", "Question", "From section"], qrows)
-    fills = {"HIGH": "FADBD8", "MEDIUM": "FCF3CF", "LOW": "D5F5E3"}
+    fills = {"HIGH": "FFE3DC", "MEDIUM": "FDF0D2", "LOW": "EEF8D0"}
     for i, (p, _, _) in enumerate(qrows):
         if p in fills:
             ws.cell(row=r + 1 + i, column=2).fill = PatternFill("solid", fgColor=fills[p])
@@ -385,8 +386,7 @@ def _exec_summary(wb, bundle, ch, exec_bullets):
                "four most important findings.")
     div = bundle["sections"].get("diversification", {})
     risk = bundle["sections"].get("risk", {})
-    kpis = [("Holdings", bundle.get("holdings_held") or bundle["holdings_count"],
-            "things you own"),
+    kpis = [("Holdings", bundle["holdings_count"], "things you own"),
             ("Effective bets", div.get("effective_holdings", "n/a"),
              "what they behave like*"),
             ("Portfolio beta", risk.get("portfolio_beta_est", "n/a"), "swing vs market"),
@@ -431,9 +431,9 @@ def _how_to_use(wb, level):
     r = note_box(ws, r, "THE STRUCTURE OF EVERY SECTION", [
         "1. A teal strip states what the section tells you — read that first.",
         "2. A small table holds the raw numbers; the chart shows the same thing visually.",
-        "3. 📖 HOW TO READ: exactly what the axes/slices mean and what to look for.",
-        "4. ✅ WHAT GOOD LOOKS LIKE: a reference point so numbers have meaning.",
-        "5. 🤖 AI INSIGHT: what the model noticed connecting THIS section to the others."],
+        "3. HOW TO READ: exactly what the axes/slices mean and what to look for.",
+        "4. WHAT GOOD LOOKS LIKE: a reference point so numbers have meaning.",
+        "5. AI INSIGHT: what the model noticed connecting THIS section to the others."],
         FILL_NOTE, F_NOTE, "🧭")
     r = note_box(ws, r, "WHAT THIS REPORT WILL NEVER DO", [
         "It never says buy, sell, hold, or predicts prices. Every insight is a finding or a "
@@ -482,7 +482,7 @@ def _methodology(wb, bundle):
     ws.cell(row=t + 1, column=2,
             value="Hard boundary: never buy/sell/hold, never predictions. Educational "
                   "analytics only. Not SEBI-registered advice.").font = \
-        Font(bold=True, size=10, color="C0392B")
+        Font(bold=True, size=10, color="C2410C")
     ws.merge_cells(start_row=t + 1, start_column=2, end_row=t + 1, end_column=11)
 
 
@@ -533,7 +533,6 @@ def _cross_context(sections: dict) -> dict:
         "diversification_score": div.get("diversification_score"),
         "effective_holdings": div.get("effective_holdings"),
         "holdings_count": div.get("holdings_count"),
-        "holdings_held": div.get("holdings_held"),
         "max_overlap_pct": sections.get("overlap", {}).get("max_overlap_pct"),
         "top_holding_weight_pct": conc.get("max_single_weight_pct"),
         "portfolio_beta_est": sections.get("risk", {}).get("portfolio_beta_est"),

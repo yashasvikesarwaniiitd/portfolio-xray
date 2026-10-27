@@ -114,7 +114,7 @@ and put the Streamlit URL + repo URL in the Typeform.
 ## If the chat refuses everything
 
 Symptom: every question — including `What is beta?` — comes back with the SEBI refusal,
-while the dashboard and holdings pages work fine.
+while the dashboard and report pages work fine.
 
 Cause: the router's classifier call is failing, and it fails **safe**, which means
 refusing. An unreachable model therefore looks identical to a compliance decision. The
