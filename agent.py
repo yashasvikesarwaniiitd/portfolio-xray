@@ -1,6 +1,7 @@
 """Portfolio X-Ray agent loop: Anthropic Messages API + yfinance/mftool tools."""
 import json
 import os
+import re
 import sys
 import time
 from datetime import date, datetime, timedelta
@@ -1118,6 +1119,29 @@ def fetch_price_history(ticker: str, period: str, max_points: int = 30) -> str:
     return json.dumps(out)
 
 
+# "[E1]" / "[E1, E3]" - an evidence citation, and the space in front of it, so stripping
+# one before a full stop does not leave " ." behind. Deliberately narrow: only E followed
+# by digits, so "[1]", "[E]" and "[Exhibit A]" are left alone.
+EVIDENCE_CITATION = re.compile(r"[ \t]*\[E\d+(?:\s*,\s*E\d+)*\]")
+
+
+def strip_evidence_ids(text: str) -> str:
+    """Remove the Investigator's evidence IDs from an answer bound for the chat.
+
+    They earn their place everywhere else. In the CLI they sit beside the verified-findings
+    list, where each ID names a tool call the reader can see; in investigation_runs they are
+    what makes a stored claim auditable. The chat window shows no ledger, so "[E1, E3]" is
+    an internal identifier with nothing to identify - it reads as a rendering bug.
+
+    Found by reading one deployed answer, not by a test: the hermetic tests assert the
+    summary comes back, never what it looks like to somebody.
+
+    Stripped at the chat boundary only. state.summary keeps its citations, so the verifier,
+    the run store and the CLI are untouched.
+    """
+    return EVIDENCE_CITATION.sub("", text or "")
+
+
 # The analytics branch's budget. Not the Investigator's default (12 steps / Rs 10 / 120s):
 # someone is watching a spinner in a browser, and a chat turn that takes two minutes is a
 # worse answer than a partial one that takes twenty seconds. Running out is not a failure -
@@ -1236,12 +1260,13 @@ def answer_query(client: anthropic.Anthropic, messages: list, user_text: str,
     # conversation before this question, which the goal prompt already carries.
     state = run_investigator(client, user_text, path, route, usage=usage,
                              history=messages[:-1])
-    answer = state.summary
+    answer = strip_evidence_ids(state.summary)
     tools_used = [ev.tool for ev in state.ledger.values()]
     messages.append({"role": "assistant", "content": answer})
-    # RunOutcome is a str Enum, so these compare without importing it — which matters,
-    # because importing xray_agent at this module's top level is the circular import
-    # run_investigator exists to avoid.
+    # RunOutcome is a str Enum, so these compare without importing it. The domain layer
+    # imports fine at module scope (see the `transactions` import above — it is pure); it
+    # is xray_agent.adapters that cannot, because legacy_tools imports THIS module. That is
+    # the cycle run_investigator's deferred imports exist to avoid.
     result = {"category": category, "answer": answer, "tools_used": tools_used,
               "refused": state.outcome == "REFUSED"}
     if state.outcome == "INCOMPLETE_BUDGET":

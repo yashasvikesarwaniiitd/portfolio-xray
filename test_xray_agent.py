@@ -497,3 +497,49 @@ def test_education_still_answers_in_one_call_with_no_tools(monkeypatch):
     assert out["tools_used"] == []
     assert len(sent) == 1, "education should cost exactly one model call"
     assert "tools" not in sent[0], "education must not be offered tools"
+
+
+# --- evidence IDs do not belong in a chat answer -------------------------------------------
+
+def test_strip_evidence_ids_removes_citations_and_the_space_before_them():
+    """Verbatim from a deployed answer. "[E1, E3]" is meaningful in the CLI, where the
+    verified-findings list is printed beside it; in a chat window it identifies nothing."""
+    import agent
+    out = agent.strip_evidence_ids(
+        "The portfolio's money-weighted XIRR is 15.57% [E1, E3]. This covers only the "
+        "four priced holdings [E3, E2].\n\nPer holding XIRR: Infosys -14.74% [E1]")
+    assert "[E" not in out
+    assert out.startswith("The portfolio's money-weighted XIRR is 15.57%.")
+    assert "holdings." in out, "the space before the citation should go with it"
+    assert "Infosys -14.74%" in out
+
+
+def test_strip_evidence_ids_leaves_other_brackets_alone():
+    """Narrow on purpose. A claim may legitimately contain brackets, and eating them would
+    be a worse bug than the one this fixes."""
+    import agent
+    for keep in ("the top-10 [disclosed] holdings", "see [1]", "[E]", "[Exhibit A]",
+                 "a range [10, 20] of values"):
+        assert agent.strip_evidence_ids(keep) == keep
+
+
+def test_the_chat_answer_has_no_evidence_ids_but_the_run_keeps_them(monkeypatch):
+    """Stripped at the chat boundary only: the stored run and the CLI still need the IDs,
+    and the verifier checked the claim WITH them."""
+    import types
+
+    import agent
+    import router
+    state = types.SimpleNamespace(
+        summary="Your HHI is 0.2453 [E1], across 5 priced holdings [E1, E2].",
+        outcome="COMPLETED", ledger={"E1": _evidence("concentration")})
+    monkeypatch.setattr(router, "classify",
+                        lambda client, query, **kw: {"category": "analytics", "reason": ""})
+    monkeypatch.setattr(agent, "run_investigator", lambda *a, **kw: state)
+
+    messages = []
+    out = agent.answer_query(object(), messages, "how concentrated am I?", {}, log=False)
+
+    assert out["answer"] == "Your HHI is 0.2453, across 5 priced holdings."
+    assert "[E1" not in messages[-1]["content"], "history must not carry them either"
+    assert state.summary.endswith("[E1, E2]."), "the RunState itself must be untouched"
