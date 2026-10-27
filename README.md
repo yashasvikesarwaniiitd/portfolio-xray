@@ -343,16 +343,18 @@ built.
   in the repo rather than two. The router still short-circuits advice, offtopic,
   education and news into the cheap deterministic paths they already had — a loop is
   the wrong shape for "what is XIRR?", and the verifier would reject an answer with
-  no evidence behind it. `agent.TOOLS` and `agent.run_tool` are now unreachable from
-  production and still to be removed.
+  no evidence behind it. `agent.TOOLS` and `agent.run_tool`, the old loop's tool table
+  and dispatcher, are deleted — `agent.py` lost 221 lines and the repo has one tool
+  table, in `xray_agent/adapters/legacy_tools.py`.
 - The Investigator is **L1 on the autonomy ladder** — it investigates when asked. It is
   not scheduled, not multi-agent, and has no memory between runs.
 
 ## What I'd build next
 
-1. **Delete `agent.TOOLS` and `agent.run_tool`** — the old loop is gone and they are
-   what is left of its plumbing, still duplicating tool definitions that now live in
-   `xray_agent/adapters/legacy_tools.py`.
+1. **A better divergence test** — the current one rules out a fixed script and nothing
+   more. Checking whether the agent drills into the holding the evidence flagged would
+   test adaptation rather than mere variation. This is the honest gap in the headline
+   claim, and it is still not built.
 2. **L2, the scheduled watcher** — the weekly digest becomes a cron-triggered run that
    decides what is *worth* reporting and stays quiet when nothing moved.
 3. **Self-filing failures** — a rejected finding should append itself to the golden

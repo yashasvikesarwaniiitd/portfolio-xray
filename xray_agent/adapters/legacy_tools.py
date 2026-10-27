@@ -108,9 +108,13 @@ def _parse_day(value, label: str) -> date:
 
 
 # --- tool schemas --------------------------------------------------------------------------
-# Deliberately a subset of agent.TOOLS: the report builder and the weekly digest are long
-# fixed pipelines of their own, and handing an agent on a step budget a tool that takes a
-# minute and writes a file is a good way to waste the whole budget on one call.
+# The repo's only tool table. It was a deliberate subset of agent.TOOLS while the chat had
+# its own; that table is deleted and this one serves both paths.
+#
+# Two tools from it were left out and stay out: the report builder and the weekly digest
+# are long fixed pipelines of their own, and handing an agent on a step budget a tool that
+# takes a minute and writes a file is a good way to waste the whole budget on one call.
+# The /report and /digest endpoints call them directly, which is the right shape for them.
 #
 # The four single-value lookups (get_price, get_index, get_return, get_nav) were missing for
 # a different reason: nobody ported them, because an investigation into why a portfolio
@@ -248,7 +252,7 @@ SCHEMAS = [
             "required": ["query"],
         },
     },
-    # --- single-value lookups, carried over verbatim from agent.TOOLS -----------------------
+    # --- single-value lookups, carried over verbatim from the chat's old tool table --------
     {
         "name": "get_price",
         "description": "Get the latest closing price for a stock by its yfinance ticker "
@@ -355,7 +359,7 @@ class LegacyTools:
             return agent.fetch_close(args["ticker"])
         if name == "get_index":
             # The schema takes a name for the model's benefit; only one index is wired, and
-            # agent.run_tool ignored the argument in exactly the same way.
+            # the chat's old dispatcher ignored the argument in exactly the same way.
             return agent.fetch_close(agent.NIFTY50_SYMBOL)
         if name == "get_return":
             return json.dumps(agent.compute_return(args["ticker"], args["period"]))

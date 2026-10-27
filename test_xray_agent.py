@@ -336,9 +336,13 @@ def test_beta_picks_the_benchmark_that_matches_the_venue():
 
 def test_the_chat_agent_can_answer_do_i_own_the_same_thing_twice():
     """The UI has always offered that chip while the chat had no tool that could answer
-    it — fund_overlap existed only inside the Investigator."""
-    import agent
-    names = {t["name"] for t in agent.TOOLS}
+    it — fund_overlap existed only inside the Investigator.
+
+    Asked of `agent.TOOLS` when the chat had its own tool table. It no longer has one, and
+    that is the better answer to this test's question: there is a single table now, so a
+    tool cannot be present for one path and missing from the other."""
+    from xray_agent.adapters.legacy_tools import SCHEMAS
+    names = {t["name"] for t in SCHEMAS}
     assert "fund_overlap" in names
 
 
@@ -353,24 +357,30 @@ def test_every_portfolio_tool_accepts_the_portfolio_it_is_asked_about():
     import inspect
     import agent
     from xray_agent.adapters.legacy_tools import LegacyTools
-    for fn in (agent.run_tool, agent.run_investigator, agent.answer_query, agent.answer_news,
+    for fn in (agent.run_investigator, agent.answer_query, agent.answer_news,
                agent.fetch_snapshot, agent.fetch_concentration, agent.fetch_fund_overlap,
                agent.fetch_sharpe, agent.fetch_portfolio_xirr, agent.fetch_digest):
         assert "path" in inspect.signature(fn).parameters, fn.__name__
     assert "portfolio_path" in inspect.signature(LegacyTools.__init__).parameters
-    assert not hasattr(agent, "turn"), "the old chat tool loop is supposed to be gone"
+    for gone in ("turn", "run_tool", "TOOLS"):
+        assert not hasattr(agent, gone), f"agent.{gone} is supposed to be gone"
 
 
-def test_run_tool_dispatches_to_the_portfolio_it_is_given(tmp_path):
+def test_the_tool_layer_dispatches_to_the_portfolio_it_is_given(tmp_path):
+    """Written against `agent.run_tool`, which is gone with the loop that called it. The
+    mistake it guards against is unchanged — reading the server default while the user is
+    looking at their own upload — and it now lives or dies in LegacyTools, which is handed
+    the path in its constructor and is the only tool dispatcher left."""
     import json as _j
-    import agent
+
+    from xray_agent.adapters.legacy_tools import LegacyTools
     a = tmp_path / "a.csv"
     a.write_text("Mode,App,Type,Market,Risk,Where,symbol,source,Total Invested,Mar'25\n"
                  "Equity,X,Share,India,Med,OnlyInA,RELIANCE.NS,yfinance,5000,5000\n",
                  encoding="utf-8")
-    out, err = agent.run_tool("load_portfolio", {}, str(a))
-    assert not err
-    assert [h["name"] for h in _j.loads(out)["holdings"]] == ["OnlyInA"]
+    res = LegacyTools(str(a)).execute("load_portfolio", {})
+    assert not res.is_error, res.content
+    assert [h["name"] for h in _j.loads(res.content)["holdings"]] == ["OnlyInA"]
 
 
 def test_a_broken_classifier_says_so_instead_of_impersonating_a_refusal():

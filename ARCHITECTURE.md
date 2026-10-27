@@ -394,8 +394,10 @@ old code were extracting the two policy functions (re-exported from `report/insi
 every existing import still works) and fixing a stale tool description. *Cost:* `agent.py`
 kept its own duplicated tool loop for a release. Benefit: the deployed app never broke, and
 the hermetic suite went 59 → 96 passing with no regressions. That loop has since been
-deleted and the chat's analytics branch moved onto this one; what survives it is the tool
-table, `agent.TOOLS`, which nothing in production reads any more.
+deleted and the chat's analytics branch moved onto this one, taking its tool table and
+dispatcher with it — 221 lines out of `agent.py`, and one tool table left in the repo.
+The wrapping was never meant to be permanent; it was meant to buy the time to do this
+without breaking the deployed app, and it did.
 
 ---
 
@@ -438,10 +440,13 @@ on the final summary regardless of where the text came from, so the injection fa
 mechanically rather than by the model's good judgement. There is a test for exactly this.
 
 **What is the weakest part?**
-`agent.py` is still 1,500 lines, and `TOOLS` and `run_tool` are now dead weight inside
-it — the old loop that used them is gone, but its tool table still sits beside the one
-in `adapters/legacy_tools.py`, so the duplication outlived the duplicate loop.
-Deleting them is the next cut.
+The divergence check. It is the eval that makes "this is an agent, not a script"
+falsifiable, and all it can currently establish is that the sequences differ — 3 of 3
+runs on this build, 7 of 8 on the one before. That rules out a script. It does not show
+the agent investigates a concentrated book more deeply *because* it is concentrated,
+which is the claim a reader will take from the word "agent". A single run has reported
+both PASS and FAIL on the same build, so the rate is the only form of this number worth
+quoting, and even the rate is evidence of variation rather than of adaptation.
 
 **What would break first at 1000 users?**
 The shared `PortfolioContext` is per-run and in-memory, which is fine, but yfinance is not a
@@ -459,8 +464,9 @@ unit tests and skipped the live trace.
 
 ## 11. What I would do next
 
-1. **Finish the unification.** `agent.turn` is gone and chat's analytics branch runs on
-   this loop; `agent.TOOLS` and `agent.run_tool` are the leftovers to delete.
+1. **Make the divergence check prove adaptation.** Assert that the holding the agent
+   drills into is the one the evidence flagged, rather than that two sequences differ.
+   See §10's answer on the weakest part.
 2. **L2 — the scheduled watcher.** The weekly digest becomes a cron-triggered run that decides
    what is *worth* reporting rather than dumping everything, and stays quiet when nothing moved.
 3. **Self-filing failures.** `CLAUDE.md` promises every production failure becomes a golden
