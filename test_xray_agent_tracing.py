@@ -168,3 +168,41 @@ def test_content_flag_is_read_from_the_environment(monkeypatch):
     assert not tl.content_enabled()
     monkeypatch.delenv("XRAY_TRACE_CONTENT")
     assert not tl.content_enabled()
+
+
+def test_the_generation_span_carries_the_exchange_not_just_its_price(monkeypatch):
+    """A generation span showing tokens and cost but no input or output tells you what a
+    call cost and nothing about what it did. The port was never handed the prompt or the
+    completion, so Langfuse rendered "—" in both columns for every llm.generate."""
+    sink, _ = _run(monkeypatch, content_enabled=True)
+    gens = [s for s in sink.spans if s.name == "llm.generate"]
+    assert gens, "no generation spans at all"
+
+    for g in gens:
+        assert "input" in g.kw and g.kw["input"] is not None
+        assert "output" in g.kw and g.kw["output"] is not None
+    # The completion is normalised rather than provider-native: the same two fields on
+    # Anthropic and on Groq, which assistant_content would not give us.
+    out = gens[0].kw["output"]
+    assert set(out) == {"text", "tool_calls", "stop_reason"}
+    # The first turn after the gate asks for update_plan, and the span should say so.
+    first_calls = [c["name"] for c in out["tool_calls"]]
+    assert "update_plan" in first_calls
+    # And the prompt is the message list the model actually saw.
+    assert isinstance(gens[0].kw["input"], list)
+    assert any("Why is my portfolio down?" in str(m) for m in gens[0].kw["input"])
+
+
+def test_the_exchange_is_redacted_by_default_like_every_other_payload(monkeypatch):
+    """Adding the prompt to the trace adds the QUESTION and, through the tool results
+    carried in the message history, the portfolio figures. If that rode out by default it
+    would break the same promise the tool spans are careful about."""
+    sink, _ = _run(monkeypatch, content_enabled=False)
+    gens = [s for s in sink.spans if s.name == "llm.generate"]
+    assert gens
+    for g in gens:
+        assert g.kw["input"] == REDACTED
+        assert g.kw["output"] == REDACTED
+    blob = json.dumps([{"name": s.name, "kw": s.kw} for s in sink.spans], default=str)
+    assert "Why is my portfolio down?" not in blob
+    assert "Reliance Industries" not in blob

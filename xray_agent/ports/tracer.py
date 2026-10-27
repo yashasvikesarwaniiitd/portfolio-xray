@@ -15,8 +15,13 @@ class TracerPort(Protocol):
 
     def plan_updated(self, state) -> None: ...
 
+    # `prompt` and `completion` are what the model SAW and SAID. They are handed over raw,
+    # like every other value here: the core does not decide what is safe to export, each
+    # adapter does. Without them a generation span can show tokens and cost but not the
+    # exchange, which is the one thing a reader opens an LLM trace to look at.
     def llm_call(self, state, *, model: str, input_tokens: int, output_tokens: int,
-                 cost_inr: float, latency_ms: int, stop_reason: str) -> None: ...
+                 cost_inr: float, latency_ms: int, stop_reason: str,
+                 prompt=None, completion=None) -> None: ...
 
     def tool_call(self, state, evidence) -> None: ...
 

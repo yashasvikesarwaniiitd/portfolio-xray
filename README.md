@@ -111,9 +111,9 @@ uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py \
   test_xray_agent_evalrouting.py test_xray_agent_broker.py -m "not regression" -q
 ```
 
-**258 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
+**260 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
 verification, prompt injection, provider translation) is tested as deterministic logic.
-257 pass and one skips unless the optional `tracing` extra is installed
+259 pass and one skips unless the optional `tracing` extra is installed
 (`uv sync --extra tracing`).
 
 Then, with `ANTHROPIC_API_KEY` or `GROQ_API_KEY` in `.env`:
@@ -191,7 +191,7 @@ question ─► ROUTER GATE ──advice──► canned refusal      (REFUSED, 
 ```
 
 Clean-architecture layering (`domain` / `application` / `ports` / `adapters`) is what lets
-the whole loop run against a scripted model and canned tools: **258 hermetic tests, no
+the whole loop run against a scripted model and canned tools: **260 hermetic tests, no
 network, no API key.**
 
 SQLite logs every query's tokens, cost and latency, and every investigation's outcome,

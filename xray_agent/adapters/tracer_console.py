@@ -68,7 +68,10 @@ class ConsoleTracer:
         self._p()
 
     def llm_call(self, state, *, model, input_tokens, output_tokens, cost_inr,
-                 latency_ms, stop_reason) -> None:
+                 latency_ms, stop_reason, prompt=None, completion=None) -> None:
+        # The exchange is accepted and not printed: the console trace already shows what
+        # the model DID on the following lines (PLAN, TOOL, FINDING), and dumping the
+        # whole re-sent message history into a terminal would bury it.
         if self.verbose:
             self._p(f"     .. {model} {input_tokens}in/{output_tokens}out "
                     f"Rs {cost_inr:.4f} {latency_ms}ms ({stop_reason})")

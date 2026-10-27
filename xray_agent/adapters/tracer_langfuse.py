@@ -106,11 +106,16 @@ class LangfuseTracer:
                               output=_content([s.description for s in state.plan])))
 
     def llm_call(self, state, *, model, input_tokens, output_tokens, cost_inr,
-                 latency_ms, stop_reason) -> None:
+                 latency_ms, stop_reason, prompt=None, completion=None) -> None:
         self._mirror("llm_call", state, model=model, input_tokens=input_tokens,
                      output_tokens=output_tokens, cost_inr=cost_inr,
                      latency_ms=latency_ms, stop_reason=stop_reason)
+        # The exchange goes through _content like every other payload, so the default is
+        # still a placeholder. A generation span without input and output shows what a
+        # call COST and nothing about what it did, which is half a trace.
         span = self._child("llm.generate", as_type="generation", model=model,
+                           input=_content(prompt),
+                           output=_content(completion),
                            usage_details={"input": input_tokens, "output": output_tokens},
                            cost_details={"total": cost_inr},
                            metadata={"stop_reason": stop_reason, "latency_ms": latency_ms,

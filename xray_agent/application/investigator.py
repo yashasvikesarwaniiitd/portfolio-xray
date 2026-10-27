@@ -211,9 +211,18 @@ class Investigator:
                                  tool_choice=tool_choice)
         latency = int((time.perf_counter() - started) * 1000)
         charged = self._charge(state, resp)
+        # What the model saw and what it said. `assistant_content` is provider-native and
+        # would render as Anthropic content blocks in one trace and a tool_calls array in
+        # another, so the completion is normalised here into the two things a reader is
+        # looking for: the prose and the calls it asked for.
+        completion = {"text": resp.text,
+                      "tool_calls": [{"name": c.name, "args": c.args}
+                                     for c in resp.tool_calls],
+                      "stop_reason": resp.stop_reason}
         self.tracer.llm_call(state, model=resp.model, input_tokens=resp.input_tokens,
                              output_tokens=resp.output_tokens, cost_inr=charged,
-                             latency_ms=latency, stop_reason=resp.stop_reason)
+                             latency_ms=latency, stop_reason=resp.stop_reason,
+                             prompt=messages, completion=completion)
         self._record(state, "llm", {"model": resp.model, "in": resp.input_tokens,
                                     "out": resp.output_tokens,
                                     # "is caching working" is the question you actually ask
