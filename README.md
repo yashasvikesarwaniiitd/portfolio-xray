@@ -265,15 +265,22 @@ cases. Measured, not scaled: the guess would have been close and still a guess. 
 portfolio behind it is the poisoned-name test fixture, so a larger book may cost more._
 
 ◆ _₹0.145 was the many-run average of the old `agent.turn` loop, which no longer exists.
-Two analytics turns through the Investigator: **₹0.2223** locally (27,487 input tokens,
-1,735 output, 3 tools, 12.9s) and **≈₹0.19** against the deployed instance (2 tools, 12.5s,
-read back from its `/stats`). So roughly 1.3–1.5× the old figure, and it moves with how many
-tools the model chooses — which is the point of a loop that chooses. The increase is the one
-§9 of ARCHITECTURE predicts: every tool result stays in the history and is re-sent, and the
-loop also carries a larger system prompt and 17 tool schemas. That is the price of a budget,
-an evidence ledger and a verifier on a path that previously had none of them. Two samples
-against the old figure's many, so both are shown rather than the new one quietly replacing
-the old._
+Three analytics turns through the Investigator, all on `portfolio.sample.csv`:_
+
+| | tools | cost |
+|---|---|---|
+| _local_ | _3_ | _**₹0.2223**_ |
+| _deployed_ | _2_ | _**≈₹0.19**_ |
+| _deployed_ | _3_ | _**≈₹0.13**_ |
+
+_So **₹0.13–0.22**, against ₹0.145 before — the old figure sits inside the new spread, and
+three runs cannot say the loop costs more. An earlier version of this note said the cost
+"moves with how many tools the model chooses"; the third run has the same tool count as the
+first and the lowest cost of the three, so that explanation does not hold either. What does
+hold is §9 of ARCHITECTURE on why the ceiling is higher: tool results stay in the history
+and are re-sent, and the loop carries a larger system prompt and 17 schemas. Three samples
+against the old figure's many, so both are shown rather than one quietly replacing the
+other._
 
 Everything runs on **Haiku 5.5** ($0.10/$0.50 per MTok). The deployed demo rate-limits to
 20 chat turns and 3 reports per IP per day, with a dashboard kill switch.
