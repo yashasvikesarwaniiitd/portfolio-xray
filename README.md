@@ -227,6 +227,7 @@ case that passes today still passes on Monday. Full table in
 | Heavy cases on `claude-haiku-5-5` | **3/3 passed** (incl. fault injection: `beta` broken on purpose → the agent routed to `sharpe` rather than inventing a number) |
 | **Tool-sequence divergence** | **3 of 3 runs differed** on the current 17-tool build; **7 of 8** on the 13-tool one before it, where the direction was 4–3 — a coin flip as to which portfolio gets the deeper investigation. Rules out a fixed script (`openai/gpt-oss-120b` produced the *same* sequence every time); does **not** establish evidence-driven adaptation, and 3 runs is a rate, not a proof. Always `--divergence-runs 3` — a single run has reported both PASS and FAIL on the same build. |
 | Light cases on Groq free tier | passed |
+| **Evidence-led drill-down** (new) | **MIXED — followed in 3 of 4 gradeable runs; 2 of 6 cases drilled into no holding and are not counted.** Asks the question divergence cannot: `attribute_move` ranks every holding by how much it moved the book, so did the agent go to the one at the top? The flag is picked by the data, never by the check's author. Only **one** of the three passes is strong — `get_news` on the flagged holding — the other two passed on a finding merely naming it, and the single failure is a 1.07× near-tie the verdict itself flags. Four runs establish that the check discriminates, not that the agent adapts. |
 
 The divergence check is the one that makes *"this is an agent, not a script"* falsifiable:
 same question, two portfolios, and the build fails if the tool sequences match. It passing
@@ -358,12 +359,13 @@ built.
 
 ## What I'd build next
 
-1. **Run the new drill-down check and publish whatever it says.** Divergence rules out a
-   fixed script and nothing more; the drill-down check (`domain/drilldown.py`) asks whether
-   the agent goes to the holding its own evidence flagged, and `agent_evals.py` reports it.
-   It is built and unit-tested against the recorded fixtures, but it has **not yet been run
-   against live model decisions**, so there is no rate here yet. If it comes back MIXED or
-   FAIL, that number goes in this README — the check was built to be able to say no.
+1. **Get the drill-down check to a sample size worth quoting.** It is built and it has run
+   once: **MIXED, 3 of 4 gradeable runs**, with only one of those three a strong pass (the
+   agent called `get_news` on the holding the evidence flagged) and the single failure a
+   1.07× near-tie. Four runs, two of which passed on the weaker "a finding names it"
+   signal, is enough to show the check discriminates and not enough to say anything about
+   the agent. It also flags the biggest **absolute** mover, which is not the same question
+   as "what made the book fall". Both are fixable; neither is fixed.
 2. **L2, the scheduled watcher** — the weekly digest becomes a cron-triggered run that
    decides what is *worth* reporting and stays quiet when nothing moved.
 3. **Self-filing failures** — a rejected finding should append itself to the golden

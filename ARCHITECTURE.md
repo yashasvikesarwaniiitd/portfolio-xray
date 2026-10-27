@@ -57,9 +57,31 @@ the agent is following a script and the claim in this section is false.
 > how much it moved the book, and the check asks whether the agent's next holding-specific
 > call went to the top of that ranking. The flagged holding is picked by the data, never by
 > the author of the check, and a run that drills into no holding is recorded as an
-> abstention rather than a pass. **It has not yet been run against live model decisions**,
-> so there is no rate to quote here and this paragraph will say what it finds, not what I
-> hope it finds.
+> abstention rather than a pass.
+>
+> **First live result: MIXED — followed the evidence in 3 of 4 runs that drilled; 2 of the
+> 6 cases drilled into no holding at all and are not counted.** Read the four before
+> quoting the three:
+>
+> - `demo_b_vs_index` is the only **strong** pass: HDFC Bank moved the book most
+>   (−2,894.53) and the agent went straight to it with `get_news(HDFC Bank shares)`.
+> - `sample_why_down` and `demo_b_why_down` passed on the weaker signal — no second tool
+>   call, but a verified finding names the flagged holding. The check accepts that on
+>   purpose (concluding from the attribution is a legitimate way to act on it) and it is
+>   not the same as going and looking.
+> - `fault_injection_beta` **diverged**, and its own note says why that is weak: TCS moved
+>   +3,428.06 and HDFC Bank 3,214.18, a 1.07× gap, so the evidence named both.
+>
+> So: one strong pass, two weak passes, one weak failure, over four gradeable runs. What
+> this establishes is that the check discriminates and reports honestly. It does not yet
+> establish that the agent adapts — n=4 with that composition is not a finding, and calling
+> MIXED a win would be the same error as quoting one divergence run.
+>
+> One asymmetry the first run exposed: the flag is the largest **absolute** market effect,
+> so in two cases it named a holding that had *gained* (TCS +3,428.06) while the question
+> asked why the book was *down*. For `demo_b` the book had in fact risen, so the flag was
+> right — but "biggest mover" and "biggest reason it fell" are not the same question, and
+> the check currently only asks the first.
 
 What it is **not**: there is no multi-agent fan-out, no autonomous scheduling, no persistent
 memory between runs. Those are on the ladder in §8, not in the code. The agency here is in
