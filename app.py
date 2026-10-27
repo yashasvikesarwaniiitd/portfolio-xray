@@ -38,6 +38,9 @@ def _backend_url() -> str:
 BACKEND = _backend_url().rstrip("/")
 COLD_NOTE = ("Waking the free-tier server (~30s) — it sleeps after 15 idle minutes "
              "to stay free. Worth the wait.")
+UNREACHABLE = ("The analysis server is unreachable. It sleeps after 15 idle minutes on the "
+               "free tier — wait ~30s and try again. If it keeps failing, the backend is "
+               "down rather than asleep.")
 
 
 def call(method: str, path: str, cold_slot=None, **kw):
@@ -469,7 +472,14 @@ MARKETS = ["India", "US", "Global"]
 RISKS = ["Low", "Med", "High"]
 
 
-def load_analysis(csv_text: str | None, label: str) -> None:
+def load_analysis(csv_text: str | None, label: str) -> bool:
+    """True if the portfolio loaded. The caller MUST NOT rerun on False.
+
+    It used to return None and every caller rerun unconditionally, which repainted the page
+    and wiped the st.error before anyone could read it — so a sleeping backend looked like a
+    dead button: click, nothing happens, no reason given. Streamlit has no other way to keep
+    a message on screen; surviving the rerun is the whole mechanism.
+    """
     slot = st.empty()
     with st.spinner("Reconstructing units from your SIP history, then valuing at today's "
                     "prices…"):
@@ -484,9 +494,16 @@ def load_analysis(csv_text: str | None, label: str) -> None:
         ss.analysis, ss.source_label, ss.csv_text = data, label, csv_text
         ss.report = None
         ss.page = "analysis"
-    else:
-        st.error(data.get("error", "The backend is unreachable — give the free tier ~30s "
-                                   "and try again."))
+        return True
+    # code 0 means the request never reached a server, so `data["error"]` is requests'
+    # own exception text — "HTTPConnectionPool(host=…): Max retries exceeded … WinError
+    # 10061". Surfacing that was the whole point of the fix above and it is still the
+    # wrong thing to show: on the free tier the overwhelmingly likely cause is a sleeping
+    # backend, which the reader can act on. A real HTTP reply DOES carry a message worth
+    # showing ("Portfolio file not found", the CSV validation errors), so that one is kept.
+    st.error(UNREACHABLE if code == 0 else
+             data.get("error", UNREACHABLE))
+    return False
 
 
 def rows_to_csv(df: pd.DataFrame) -> tuple[str, int]:
@@ -559,8 +576,8 @@ with st.sidebar:
         st.write("")
         if st.button("Load the sample", key="rail_sample", use_container_width=True,
                      type="primary"):
-            load_analysis(None, "Sample portfolio")
-            st.rerun()
+            if load_analysis(None, "Sample portfolio"):
+                st.rerun()
 
     st.markdown('<div class="rail-foot">Educational only — not advice, not '
                 'SEBI-registered. Nothing you upload is stored.</div>',
@@ -665,8 +682,8 @@ def page_analysis() -> None:
         st.write("")
         c1, c2 = st.columns([1, 3])
         if c1.button("Load the sample", type="primary", use_container_width=True):
-            load_analysis(None, "Sample portfolio")
-            st.rerun()
+            if load_analysis(None, "Sample portfolio"):
+                st.rerun()
         if c2.button("Enter my own holdings", use_container_width=True):
             ss.page = "holdings"
             st.rerun()
@@ -941,8 +958,8 @@ def page_holdings() -> None:
     with c1:
         if st.button("Analyse my portfolio →", type="primary", use_container_width=True,
                      disabled=ready == 0):
-            load_analysis(csv_text, "Your portfolio (not stored)")
-            st.rerun()
+            if load_analysis(csv_text, "Your portfolio (not stored)"):
+                st.rerun()
     with c2:
         st.download_button("Blank template", data=csv_text if ready else
                            "Mode,App,Type,Market,Risk,Where,symbol,source,"
@@ -971,8 +988,8 @@ def page_holdings() -> None:
             if not payload:
                 st.warning("Upload or paste a CSV first.")
             else:
-                load_analysis(payload, "Your portfolio (not stored)")
-                st.rerun()
+                if load_analysis(payload, "Your portfolio (not stored)"):
+                    st.rerun()
 
 
 # ---------------------------------------------------------------- render
