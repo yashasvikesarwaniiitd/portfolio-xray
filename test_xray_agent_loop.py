@@ -812,3 +812,48 @@ def test_the_flagged_holding_parses_the_real_recorded_attribute_move_output():
         assert flag.name == biggest["name"], f"{flag.name} != {biggest['name']} for {k}"
         checked += 1
     assert checked >= 3, f"only {checked} real attributions exercised"
+
+
+# --- the rewrite request itself --------------------------------------------------------------
+
+def _rewrite_request(llm):
+    """The user turn the model is given when its summary is rejected."""
+    return llm.calls[-1]["messages"][-1]["content"]
+
+
+def test_the_rewrite_request_names_the_fault_and_has_no_unfilled_placeholder():
+    """The rewrite prompt is a template with a {fault} slot. It was sent unformatted, so the
+    model was told 'Your summary was rejected: {fault}' - it never learned WHY, and could not
+    fix the problem it was asked to fix."""
+    tools = FakeTools({"attribute_move": MOVE})
+    agent_, llm = _agent([
+        classifies("analytics"),
+        calls(("attribute_move", WINDOW)),
+        calls(("record_finding", {"claim": "The portfolio fell 12450.5.",
+                                  "evidence_ids": ["E1"]})),
+        calls(("finish", {"summary": "Fell 12450.5 - you should exit the laggards."})),
+        says("The portfolio fell 12450.5 over the window."),
+    ], tools)
+    agent_.investigate("Why am I down?", "portfolio.sample.csv")
+
+    ask = _rewrite_request(llm)
+    assert "{" not in ask and "}" not in ask, ask
+    assert "reads as advice" in ask
+    assert "you should exit the laggards" in ask      # the rejected text is still handed back
+
+
+def test_an_unsourced_number_fault_is_named_in_the_rewrite_request():
+    tools = FakeTools({"attribute_move": MOVE})
+    agent_, llm = _agent([
+        classifies("analytics"),
+        calls(("attribute_move", WINDOW)),
+        calls(("record_finding", {"claim": "The portfolio fell 12450.5.",
+                                  "evidence_ids": ["E1"]})),
+        calls(("finish", {"summary": "Still a 61.4% drawdown though."})),
+        says("The portfolio fell 12450.5 over the window."),
+    ], tools)
+    agent_.investigate("Why am I down?", "portfolio.sample.csv")
+
+    ask = _rewrite_request(llm)
+    assert "{" not in ask and "}" not in ask, ask
+    assert "61.4" in ask and "absent from the evidence" in ask

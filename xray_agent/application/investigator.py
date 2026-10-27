@@ -416,7 +416,9 @@ class Investigator:
             self.tracer.note(state, f"summary rejected ({bad}) — regenerating once")
             try:
                 messages = messages + [
-                    {"role": "user", "content": prompts.REWRITE_SUMMARY + "\n\n" + summary}]
+                    {"role": "user",
+                     "content": prompts.REWRITE_SUMMARY.format(fault=bad)
+                                + "\n\nThe rejected summary:\n" + summary}]
                 resp = self._generate(state, messages, tools=None, max_tokens=700)
                 rewritten = (resp.text or "").strip()
                 if rewritten and not self._summary_faults(state, rewritten):
