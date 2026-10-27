@@ -16,6 +16,7 @@ import json
 import os
 import re
 import time
+import uuid
 
 import pandas as pd
 import requests
@@ -38,6 +39,9 @@ def _backend_url() -> str:
 BACKEND = _backend_url().rstrip("/")
 COLD_NOTE = ("Waking the free-tier server (~30s) — it sleeps after 15 idle minutes "
              "to stay free. Worth the wait.")
+# Mirrors storage.TTL_DAYS. Duplicated rather than imported: the frontend must not import
+# backend modules, because it is deployed separately and has no database credential.
+STORAGE_TTL_DAYS = 90
 UNREACHABLE = ("The analysis server is unreachable. It sleeps after 15 idle minutes on the "
                "free tier — wait ~30s and try again. If it keeps failing, the backend is "
                "down rather than asleep.")
@@ -63,6 +67,70 @@ def call_json(method: str, path: str, cold_slot=None, **kw):
         return code, json.loads(content)
     except Exception:
         return code, {"error": content.decode(errors="replace")[:300]}
+
+
+# ---------------------------------------------------------------- saved portfolios
+
+def owner_key(create: bool = False) -> str:
+    """The secret that owns your saved portfolios, kept in the URL as `?k=…`.
+
+    Streamlit has no writable browser storage — session state dies on refresh, which is
+    the very problem saving exists to solve, and `st.context.cookies` is read-only. A
+    query parameter is the one place a value survives a refresh without adding a
+    third-party component, and it has the useful property of being visible: this is a
+    capability, and anyone you send the URL to gets your saved portfolios with it.
+
+    Minted on the first SAVE, not on first visit, so the URL of a reader who never saves
+    anything is left alone.
+    """
+    k = st.query_params.get("k", "")
+    if not k and create:
+        k = uuid.uuid4().hex
+        st.query_params["k"] = k
+    return k
+
+
+def saved_list() -> tuple[bool, list]:
+    """(storage_enabled, rows). Cached in session state, because the rail re-renders on
+    EVERY interaction and this is a database round trip to another continent.
+
+    Measured before caching: 0.6-1.0s per call with a key, against 0.005s without one —
+    the early return below is why a visitor who never saves pays nothing. Left uncached,
+    every chip click and page switch would have carried a second of Singapore latency.
+
+    The list only changes when this browser saves or deletes, and both paths clear the
+    cache, so there is nothing to go stale except a second tab — which a reload fixes.
+
+    Both failure modes return storage-off rather than raising, so a paused Supabase
+    project degrades the app to session-only instead of breaking the rail.
+    """
+    if ss.get("saved_cache") is not None:
+        return ss.saved_cache
+    k = owner_key()
+    if not k:
+        return True, []                      # no key yet: nothing to fetch, nothing to cache
+    code, data = call_json("GET", "/portfolios", headers={"X-Owner-Key": k})
+    out = ((False, []) if code != 200 or not isinstance(data, dict)
+           else (bool(data.get("enabled")), data.get("portfolios") or []))
+    ss.saved_cache = out
+    return out
+
+
+def saved_save(name: str, csv_text: str) -> str | None:
+    code, data = call_json("POST", "/portfolios", headers={"X-Owner-Key": owner_key(True)},
+                           json={"name": name, "csv_text": csv_text})
+    ss.saved_cache = None
+    return None if code == 200 else (data.get("error") or "Could not save.")
+
+
+def saved_load(pid: str) -> dict | None:
+    code, data = call_json("GET", f"/portfolios/{pid}", headers={"X-Owner-Key": owner_key()})
+    return data if code == 200 else None
+
+
+def saved_delete(pid: str) -> None:
+    call_json("DELETE", f"/portfolios/{pid}", headers={"X-Owner-Key": owner_key()})
+    ss.saved_cache = None
 
 
 # ---------------------------------------------------------------- formatting helpers
@@ -550,6 +618,7 @@ ss.setdefault("csv_text", None)      # user's own portfolio, held in memory only
 ss.setdefault("portfolios", {})      # name -> {csv_text, analysis, label}
 ss.setdefault("active", None)
 ss.setdefault("rail_upload_sig", None)   # the last file the rail uploader tried
+ss.setdefault("saved_cache", None)       # (enabled, rows); None = refetch
 ss.setdefault("chat", [])
 ss.setdefault("queued", None)
 ss.setdefault("pending", None)   # question awaiting an answer (already shown in the thread)
@@ -727,10 +796,57 @@ with st.sidebar:
                              "Your portfolio (not stored)", name=stem):
                 st.rerun()
     st.markdown('<div class="rail-cap">A Groww equity or mutual-fund transaction report, '
-                'or the SIP sheet. Held in this tab only.</div>', unsafe_allow_html=True)
+                'or the SIP sheet.</div>', unsafe_allow_html=True)
+
+    # --- saved portfolios -----------------------------------------------------------
+    enabled, saved = saved_list()
+    if enabled:
+        st.markdown('<div class="rail-hr"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="rail-label">Saved</div>', unsafe_allow_html=True)
+
+        if ss.analysis and ss.csv_text:
+            # Only an uploaded book can be saved. The sample is already one click away and
+            # a copy of it would just be clutter in a list capped at a dozen.
+            if st.button("Save this portfolio", key="save_pf", use_container_width=True,
+                         icon=":material/bookmark_add:"):
+                err = saved_save(ss.active or "Portfolio", ss.csv_text)
+                if err:
+                    st.error(err)
+                else:
+                    st.rerun()
+
+        for row in saved:
+            c1, c2 = st.columns([4, 1])
+            with c1:
+                if st.button(row["name"], key=f"sv_{row['id']}", use_container_width=True,
+                             icon=":material/folder_open:",
+                             help=f"Saved {row['created_at'][:10]}"):
+                    got = saved_load(row["id"])
+                    if got and load_analysis(got["csv_text"], "Saved portfolio",
+                                             name=got["name"]):
+                        st.rerun()
+                    elif not got:
+                        st.error("That portfolio could not be loaded.")
+            with c2:
+                if st.button("", key=f"rm_{row['id']}", use_container_width=True,
+                             icon=":material/delete:", help="Delete permanently"):
+                    saved_delete(row["id"])
+                    st.rerun()
+
+        if not saved:
+            st.markdown('<div class="rail-cap">Nothing saved yet. Load a portfolio of '
+                        'your own, then save it to find it here next time.</div>',
+                        unsafe_allow_html=True)
+        else:
+            # The URL IS the key. Saying so is the only honest way to offer this without
+            # accounts: there is no password to steal and no way to recover a lost link.
+            st.markdown('<div class="rail-cap">Bookmark this page — the link is what '
+                        'brings these back, and anyone you send it to can see them. '
+                        f'Kept {STORAGE_TTL_DAYS} days.</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="rail-foot">Educational only — not advice, not '
-                'SEBI-registered. Nothing you upload is stored.</div>',
+                'SEBI-registered. Portfolios you upload are analysed and discarded; only '
+                'the ones you explicitly save are kept.</div>',
                 unsafe_allow_html=True)
 
 

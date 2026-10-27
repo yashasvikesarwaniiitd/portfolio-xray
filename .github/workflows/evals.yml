@@ -18,7 +18,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --frozen
       - name: Hermetic suite (pure functions, guardrails, no network, no API key)
-        run: uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py test_xray_agent_loop.py test_xray_agent_tracing.py test_xray_agent_groq.py test_xray_agent_evalrouting.py test_xray_agent_broker.py -m "not regression" -q
+        run: uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py test_xray_agent_loop.py test_xray_agent_tracing.py test_xray_agent_groq.py test_xray_agent_evalrouting.py test_xray_agent_broker.py test_storage.py -m "not regression" -q
 
   market-data-regressions:
     # Live yfinance/AMFI regressions (Parag Parikh unit lock, golden report with AI
@@ -30,4 +30,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --frozen
-      - run: uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py test_xray_agent_loop.py test_xray_agent_tracing.py test_xray_agent_groq.py test_xray_agent_evalrouting.py test_xray_agent_broker.py -m regression -q
+      - run: uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py test_xray_agent_loop.py test_xray_agent_tracing.py test_xray_agent_groq.py test_xray_agent_evalrouting.py test_xray_agent_broker.py test_storage.py -m regression -q

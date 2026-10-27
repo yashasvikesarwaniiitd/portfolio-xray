@@ -110,12 +110,13 @@ as partial. Hand-written, no agent framework. Full design in
 uv sync
 uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py \
   test_xray_agent_loop.py test_xray_agent_tracing.py test_xray_agent_groq.py \
-  test_xray_agent_evalrouting.py test_xray_agent_broker.py -m "not regression" -q
+  test_xray_agent_evalrouting.py test_xray_agent_broker.py test_storage.py \
+  -m "not regression" -q
 ```
 
-**260 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
+**267 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
 verification, prompt injection, provider translation) is tested as deterministic logic.
-259 pass and one skips unless the optional `tracing` extra is installed
+266 pass and one skips unless the optional `tracing` extra is installed
 (`uv sync --extra tracing`).
 
 Then, with `ANTHROPIC_API_KEY` or `GROQ_API_KEY` in `.env`:
@@ -189,7 +190,7 @@ question ─► ROUTER GATE ──advice──► canned refusal      (REFUSED, 
 ```
 
 Clean-architecture layering (`domain` / `application` / `ports` / `adapters`) is what lets
-the whole loop run against a scripted model and canned tools: **260 hermetic tests, no
+the whole loop run against a scripted model and canned tools: **267 hermetic tests, no
 network, no API key.**
 
 SQLite logs every query's tokens, cost and latency, and every CLI investigation's outcome,
@@ -321,8 +322,10 @@ built.
 - **Tiered inputs**: weights-only (Tier 1) unlocks allocation/diversification/
   concentration/overlap — no amounts needed. Monthly SIP history (Tier 2) unlocks exact
   values, risk and cost. The report says exactly what each tier unlocks.
-- **Nothing stored**: an uploaded portfolio lives in a temp file for one request and is
-  deleted in a `finally` on every endpoint that accepts one. The generated Excel report is
+- **Nothing is stored unless you ask for it.** Analysing a portfolio keeps nothing: it
+  lives in a temp file for one request and is deleted in a `finally` on every endpoint
+  that accepts one. The single exception is the **Save** button, which is opt-in, per
+  portfolio, and described in its own bullet below. The generated Excel report is
   deleted by a `BackgroundTask` once the response has been sent — it cannot be unlinked
   before `FileResponse` streams it, and for a while it was not being unlinked at all,
   which left a complete portfolio workbook on disk after every report. Found by auditing
@@ -330,13 +333,31 @@ built.
 - **The query log holds no portfolio content**: one row per query with category, tool
   *names*, model names, token counts, cost and latency — no message text, no holdings, no
   amounts. There is a test asserting the table has no column that could carry any.
-- **Several portfolios, none of them stored**: add them from the sidebar — the sample, or
-  your own CSV — and switch between them from the row above the page title. Every page
-  follows the selected one, the analyst included. Each is kept in Streamlit's session
-  state, in the browser; nothing is written server-side, which is why they are lost on
-  refresh — a deliberate trade, since a public demo has no auth and persisting strangers'
-  portfolios to save them a re-upload is a bad bargain. Switching clears the chat thread,
-  because figures from one book have no business sitting under another's heading.
+- **Several portfolios at once**: add them from the sidebar — the sample, or your own CSV
+  — and switch between them from the row above the page title. Every page follows the
+  selected one, the analyst included. They live in Streamlit's session state and vanish on
+  refresh. Switching clears the chat thread, because figures from one book have no
+  business sitting under another's heading.
+- **Saving, and what it costs you.** A loaded portfolio can be saved to Postgres
+  (Supabase), and that is the only user data this product keeps. It is worth being exact
+  about the trade, because there are no accounts:
+  - **What is kept:** the CSV you uploaded, its name, and three timestamps. *Not* the
+    analysis — that is a function of today's prices, so a stored copy would be a wrong
+    answer dressed as a saved one. Re-running it on load costs seconds and tells the truth.
+  - **Who can read it:** whoever holds the key. Your browser mints a random 128-bit secret
+    on first save and keeps it in the URL as `?k=…`; the server stores only its SHA-256,
+    and the owner hash is part of the `WHERE` clause, so a wrong key finds no row rather
+    than finding one and being refused. A database dump yields hashes, not keys.
+  - **The cost of having no accounts:** the URL *is* the password. Anyone you send it to
+    gets your saved portfolios, and nobody — including the server — can recover a lost
+    link, because the key was never recorded. Nothing to steal, nothing to reset.
+  - **Bounded by construction:** 12 portfolios per key, 256KB each, deleted after 90 days
+    by a sweep that runs on the next write — the same pattern the rate-limit table uses
+    rather than accumulating rows forever.
+  - **It fails off, not loudly.** Supabase's free tier pauses a project after a week of
+    inactivity. Every storage call returns a falsy sentinel instead of raising, so a
+    paused or unreachable database costs you the save feature and nothing else: the app
+    degrades to exactly its session-only behaviour. There are tests for that path.
 - **Rate limiting keeps IP addresses for one day**: the counter needs only today's row, so
   older ones are deleted on write rather than accumulating.
 - The Investigator's SQLite tables (`investigation_runs`) *do* record the question and the

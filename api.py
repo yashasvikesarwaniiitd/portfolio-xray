@@ -26,6 +26,7 @@ from starlette.background import BackgroundTask
 import agent
 import logger
 import metrics
+import storage
 
 VERSION = "1.0.0"
 CHAT_LIMIT_PER_DAY = 20
@@ -366,3 +367,76 @@ async def report(request: Request, file: UploadFile | None = None, no_ai: int = 
         if not delivered:
             # Generation failed, so no response will carry the background task away.
             _quiet_unlink(out.name)
+
+
+# --- saved portfolios ----------------------------------------------------------------------
+# The only user data this service keeps. Ownership is a secret the BROWSER holds: the
+# client sends it in X-Owner-Key, the server stores its SHA-256, and a row is reachable by
+# whoever presents the key and nobody else. See storage.py for why there are no accounts.
+#
+# The key travels in a header rather than the path or a query string because URLs are
+# logged by proxies and land in browser history; headers are not written to Render's
+# request log.
+
+def _owner(request: Request) -> str:
+    return (request.headers.get("X-Owner-Key") or "").strip()
+
+
+@app.get("/portfolios")
+def portfolios_list(request: Request):
+    """Metadata only, never the CSV: a listing must not double as a bulk export."""
+    if not storage.configured():
+        return {"enabled": False, "portfolios": []}
+    return {"enabled": True, "portfolios": storage.list_for(_owner(request))}
+
+
+@app.post("/portfolios")
+async def portfolios_save(request: Request):
+    if not storage.configured():
+        return JSONResponse(status_code=503, content={"error": "Saving is not switched on."})
+    key = _owner(request)
+    if not key:
+        return JSONResponse(status_code=400, content={"error": "No owner key."})
+    body = await request.json()
+    csv_text = str(body.get("csv_text") or "")
+    if not csv_text.strip():
+        return JSONResponse(status_code=400, content={"error": "Nothing to save."})
+    # Validate before storing. A file the engine cannot read is not worth keeping, and
+    # finding that out on LOAD would make a saved portfolio a trap rather than a shortcut.
+    try:
+        path = _csv_to_temp(csv_text)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    try:
+        agent.read_portfolio(path)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    finally:
+        _quiet_unlink(path)
+
+    pid = storage.save(key, str(body.get("name") or "Portfolio"), csv_text)
+    if not pid:
+        return JSONResponse(status_code=400, content={
+            "error": f"Could not save — at most {storage.MAX_PER_OWNER} portfolios per "
+                     "browser, and the file must be under "
+                     f"{storage.MAX_CSV_BYTES // 1000}KB. Delete one and try again."})
+    return {"id": pid}
+
+
+@app.get("/portfolios/{pid}")
+def portfolios_load(pid: str, request: Request):
+    if not storage.configured():
+        return JSONResponse(status_code=503, content={"error": "Saving is not switched on."})
+    got = storage.load(_owner(request), pid)
+    if not got:
+        # Deliberately the same answer for "no such row" and "not yours": distinguishing
+        # them would confirm that an id exists to someone holding the wrong key.
+        return JSONResponse(status_code=404, content={"error": "Not found."})
+    return got
+
+
+@app.delete("/portfolios/{pid}")
+def portfolios_delete(pid: str, request: Request):
+    if not storage.configured():
+        return JSONResponse(status_code=503, content={"error": "Saving is not switched on."})
+    return {"deleted": storage.delete(_owner(request), pid)}
