@@ -10,7 +10,7 @@ and provably refuses to give advice.**
 
 The hosted demo is the **assistant** — chat, dashboard, Excel health report. The
 **Investigator** (the agent, below) runs from the CLI and is deliberately not exposed on a
-public endpoint: one investigation costs ₹2.41–8.69 of real inference, and putting that
+public endpoint: one investigation costs ₹0.11–0.25 of real inference, and putting that
 behind an open URL on a personal API key is a liability, not a feature. Run it yourself in
 60 seconds — it needs no network for market data.
 
@@ -99,11 +99,15 @@ as partial. Hand-written, no agent framework. Full design in
 
 ```bash
 uv sync
-uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py     test_xray_agent_loop.py test_xray_agent_tracing.py test_xray_agent_groq.py     test_xray_agent_evalrouting.py -m "not regression" -q
+uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py \
+  test_xray_agent_loop.py test_xray_agent_tracing.py test_xray_agent_groq.py \
+  test_xray_agent_evalrouting.py test_xray_agent_broker.py -m "not regression" -q
 ```
 
-**135 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
+**232 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
 verification, prompt injection, provider translation) is tested as deterministic logic.
+231 pass and one skips unless the optional `tracing` extra is installed
+(`uv sync --extra tracing`).
 
 Then, with `ANTHROPIC_API_KEY` or `GROQ_API_KEY` in `.env`:
 
@@ -180,7 +184,7 @@ question ─► ROUTER GATE ──advice──► canned refusal      (REFUSED, 
 ```
 
 Clean-architecture layering (`domain` / `application` / `ports` / `adapters`) is what lets
-the whole loop run against a scripted model and canned tools: **96 hermetic tests, no
+the whole loop run against a scripted model and canned tools: **232 hermetic tests, no
 network, no API key.**
 
 SQLite logs every query's tokens, cost and latency, and every investigation's outcome,
@@ -233,8 +237,8 @@ evidence. Tool correctness over the same run went **up**, 89% → 100%. A number
 because the measurement got honest is worth more than the number it replaced.
 
 CI runs the deterministic suite on every push (zero API spend); credit-spending evals are
-manual targets: `make evals-full` (assistant), `make evals-agent` (~₹30, all Anthropic),
-`make evals-agent-mix` (~₹17, heavy cases on Anthropic and light ones free on Groq), and
+manual targets: `make evals-full` (assistant), `make evals-agent` (~₹1.2, all Anthropic),
+`make evals-agent-mix` (~₹0.6, heavy cases on Anthropic and light ones free on Groq), and
 `make evals-agent-free` (₹0, everything on Groq).
 
 ## Economics (from the real SQLite log, not estimates)
@@ -338,4 +342,4 @@ built.
 ---
 
 _Educational analytics, not investment advice. Not SEBI-registered. Built with Claude
-(Haiku 4.5 for routing/judging/insights); every financial number is computed in Python._
+(Haiku 5.5 for routing/judging/insights); every financial number is computed in Python._
