@@ -376,18 +376,31 @@ def is_usd_denominated(source: str, symbol: str) -> bool:
     return not code.endswith((".NS", ".BO"))
 
 
+_FX_COVERED: list = [None, None]     # [first, last] date the cache was last fetched for
+
+
 def _usdinr_map(start: date, end: date) -> dict:
-    """{date: USD/INR} over the window, cached per process. Empty on any failure."""
+    """{date: USD/INR} over the window, cached per process. Empty on any failure.
+
+    The cache remembers the RANGE it was fetched for and refetches when a request reaches
+    outside it. It used to check only that the start date was held, so a process that stayed up
+    past midnight asked for the same start and a later end, found the start cached, and never
+    fetched the newer rates: dollar holdings were converted at a stale rate until a restart."""
     global _FX_CACHE
-    need = [start + timedelta(days=i) for i in range((end - start).days + 1)]
-    if not all(d in _FX_CACHE for d in need[:1]):
+    lo, hi = _FX_COVERED
+    if lo is None or start < lo or end > hi:
         try:
+            # Fetch the UNION of what is held and what is asked for, so the range the cache
+            # claims to cover never has a hole in it.
+            first = start - timedelta(days=10)
+            first = first if lo is None else min(lo, first)
+            last = end if hi is None else max(hi, end)
             hist = yf.Ticker(USDINR_SYMBOL).history(
-                start=(start - timedelta(days=10)).isoformat(),
-                end=(end + timedelta(days=1)).isoformat())
+                start=first.isoformat(), end=(last + timedelta(days=1)).isoformat())
             for idx, v in hist["Close"].items():
                 if pd.notna(v):
                     _FX_CACHE[idx.date()] = float(v)
+            _FX_COVERED[0], _FX_COVERED[1] = first, last
         except Exception:
             pass
     return _FX_CACHE
@@ -840,18 +853,15 @@ def fetch_beta(symbol: str, period: str = "2y", benchmark: str | None = None) ->
 def _holding_series_and_value(h: dict, lookback_days: int = 370):
     """For Sharpe: reconstruct current value and return the last ~1y of closes/NAVs as a
     date-indexed Series, from a single price fetch. (None, None) if not usable."""
-    if h["source"] in ("", "manual") or not h["symbol"] or not h["inflows"]:
+    # Valued by the same routine as the snapshot, so a statement holding's SALES are seen:
+    # reading `inflows` (the buys alone) valued a fully exited position as if still held.
+    cap: dict = {}
+    row = reconstruct_holding(h, capture=cap)
+    pmap = cap.get("price_map")
+    if row.get("status") != "priced" or not pmap:
         return None, None
-    start = date(h["inflows"][0][0], h["inflows"][0][1], 1) - timedelta(days=15)
+    value = row["current_value"]
     today = date.today()
-    pmap = _price_map(h["source"], h["symbol"], start, today)
-    if not pmap:
-        return None, None
-    latest = pmap[max(pmap)]
-    priced = [{"date": date(y, m, 1), "amount": amt,
-               "price": metrics.nav_on_or_before(pmap, date(y, m, 1))}
-              for (y, m, amt) in h["inflows"]]
-    value = metrics.reconstruct_units(priced)["total_units"] * latest
     cutoff = today - timedelta(days=lookback_days)
     s = pd.Series({pd.Timestamp(d): p for d, p in pmap.items() if d >= cutoff}).sort_index()
     return value, s
@@ -1055,26 +1065,24 @@ _DIGEST_STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".diges
 
 def _digest_holding(h: dict) -> dict:
     """Value one holding and compute its ~1-week price move from a single price fetch."""
-    if h["source"] in ("", "manual") or not h["symbol"] or not h["inflows"]:
+    if h["source"] in ("", "manual") or not h["symbol"]:
         return {"name": h["name"], "status": "unavailable"}
     try:
-        start = date(h["inflows"][0][0], h["inflows"][0][1], 1) - timedelta(days=15)
-        today = date.today()
-        pmap = _price_map(h["source"], h["symbol"], start, today)
-        if not pmap:
+        # Valued by the snapshot's own routine so a statement's SALES count: units rebuilt from
+        # `inflows` (buys only) showed a fully exited holding as live, with a value.
+        cap: dict = {}
+        row = reconstruct_holding(h, capture=cap)
+        if row.get("status") == "closed":
+            return {"name": h["name"], "status": "closed"}
+        pmap = cap.get("price_map")
+        if row.get("status") != "priced" or not pmap:
             return {"name": h["name"], "status": "unavailable"}
         price_date = max(pmap)
         latest = pmap[price_date]
-        priced = [{"date": date(y, m, 1), "amount": amt,
-                   "price": metrics.nav_on_or_before(pmap, date(y, m, 1))}
-                  for (y, m, amt) in h["inflows"]]
-        rec = metrics.reconstruct_units(priced)
-        if rec["total_units"] == 0:
-            return {"name": h["name"], "status": "unavailable"}
         week_ago = metrics.nav_on_or_before(pmap, price_date - timedelta(days=7), max_back=10)
         week_pct = round((latest / week_ago - 1) * 100, 2) if week_ago else None
         return {"name": h["name"], "symbol": h["symbol"], "market": h["market"],
-                "status": "priced", "value": round(rec["total_units"] * latest, 2),
+                "status": "priced", "value": row["current_value"],
                 "week_change_pct": week_pct, "price_date": str(price_date)}
     except Exception:
         return {"name": h["name"], "status": "unavailable"}

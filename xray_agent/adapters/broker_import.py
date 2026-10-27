@@ -59,12 +59,20 @@ FIELD_SYNONYMS = {
 EXECUTED_WORDS = {"executed", "execute", "complete", "completed", "success", "successful",
                   "filled", "traded", "confirmed", "settled", "done", "ok"}
 NOT_EXECUTED_WORDS = {"cancelled", "canceled", "rejected", "failed", "expired", "pending",
-                      "open", "lapsed", "reversed", "cancel", "reject", "aborted"}
+                      "open", "lapsed", "reversed", "cancel", "reject", "aborted",
+                      # Negations. "Not executed" contains the word "executed", and a status
+                      # that is checked word by word must see the "not" first.
+                      "not", "non", "never", "unexecuted", "unfilled", "unsuccessful",
+                      "incomplete", "uncompleted", "unconfirmed", "unsettled"}
 
 BUY_WORDS = {"buy", "b", "bought", "purchase", "purchased", "credit", "cr", "sip",
              "investment", "invest", "subscription"}
 SELL_WORDS = {"sell", "s", "sold", "sale", "redeem", "redemption", "redeemed", "debit",
-              "dr", "withdrawal", "switch out"}
+              "dr", "withdrawal", "switch out", "swp"}
+# Words that say the units LEFT the account. They win over a buy word in the same label: in
+# "SIP Redemption" the "SIP" names the plan the units came from, not the direction.
+STRONG_SELL_WORDS = {"sell", "sold", "sale", "redeem", "redemption", "redeemed", "withdrawal",
+                     "swp"}
 
 DATE_FORMATS = ["%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y", "%d-%b-%Y", "%d %b %Y",
                 "%d-%B-%Y", "%d %B %Y", "%Y/%m/%d", "%b %d, %Y", "%d.%m.%Y"]
@@ -143,6 +151,8 @@ def parse_side(value, quantity: float | None) -> str | None:
     token = _norm(value)
     if token:
         words = set(token.split())
+        if words & STRONG_SELL_WORDS or token == "switch out":
+            return SELL
         if words & BUY_WORDS or token in BUY_WORDS:
             return BUY
         if words & SELL_WORDS or token in SELL_WORDS:

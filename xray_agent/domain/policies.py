@@ -22,6 +22,39 @@ _IMPERATIVE = re.compile(
     r"offload(?:ing)?|book(?:ing)?\s+profits?|add(?:ing)?\s+more|"
     r"switch(?:ing)?\s+(?:to|into)|trim(?:ming)?|rebalanc(?:e|ing)\s+into)\b",
     re.IGNORECASE)
+# The verbs of an instruction about a holding. "hold" is one of the three words the product
+# promises never to say, and "reduce"/"cut" are how it is usually softened - so these are caught
+# when they are aimed at the reader, never when they merely appear ("your holdings", "a rate cut",
+# "the estimate should hold" are all analytics and must pass).
+_ACT = (r"(?:hold|keep\s+holding|stay\s+invested|stay\s+put|reduce|cut|trim|sell|buy|exit|"
+        r"increase|decrease|lower|raise|switch|swap|rebalance|redeem|liquidate|dump|offload|"
+        r"accumulate|top\s+up|average\s+down|book\s+profits?)")
+_ACT_ING = (r"(?:hold(?:ing)?|reduc(?:e|ing)|cut(?:ting)?|trim(?:ming)?|sell(?:ing)?|buy(?:ing)?|"
+            r"exit(?:ing)?|increas(?:e|ing)|decreas(?:e|ing)|lower(?:ing)?|rais(?:e|ing)|"
+            r"switch(?:ing)?|swap(?:ping)?|rebalanc(?:e|ing)|liquidat(?:e|ing)|dump(?:ing)?|"
+            r"accumulat(?:e|ing)|averag(?:e|ing)\s+down)")
+_ADVISORY = re.compile(
+    # "You should hold X", "investors must reduce...", "I would hold on to..."
+    r"\b(?:you|investors?|one|we|i)\s+(?:should|must|ought\s+to|need\s+to|have\s+to|would|"
+    r"might\s+want\s+to|may\s+want\s+to|might\s+wish\s+to|could\s+consider)\s+"
+    r"(?:also\s+|now\s+|probably\s+|perhaps\s+|simply\s+)*" + _ACT + r"(?![-\w])"
+    # "It would be wise to reduce...", "might want to cut..."
+    r"|\b(?:would\s+be\s+(?:wise|prudent|sensible)\s+to|might\s+want\s+to|may\s+want\s+to|"
+    r"better\s+to)\s+" + _ACT + r"(?![-\w])"
+    # "Consider whether to hold or reduce", "consider trimming", "consider cutting"
+    r"|\bconsider\s+(?:whether\s+(?:or\s+not\s+)?(?:to\s+)?|to\s+)?" + _ACT_ING + r"(?![-\w])"
+    # "I recommend reducing...", "we suggest that you cut...", "advise you to hold"
+    r"|\b(?:recommend|suggest|advise)s?\s+(?:that\s+you\s+|you\s+to\s+|you\s+|to\s+)?"
+    + _ACT_ING + r"(?![-\w])",
+    re.IGNORECASE)
+# A sentence that OPENS with the verb is an order: "Hold HDFC Bank." / "Reduce your exposure."
+# Needs an object after it, so "Cut-off date" and "Hold on" are left alone.
+_ORDER = re.compile(
+    r"(?:^|[.!?]\s+)(?i:(?:please\s+)?(?:hold|reduce|cut|trim|sell|buy|exit|liquidate|"
+    r"redeem|rebalance|switch)\s+(?:your|the|some|more|less|all|any|it|them|this|that|"
+    r"exposure|position|stake))"
+    r"|(?:^|[.!?]\s+)(?i:(?:please\s+)?(?:hold|reduce|cut|trim|sell|buy|exit|liquidate|"
+    r"redeem|rebalance|switch))\s+[A-Z][A-Za-z&]+", re.MULTILINE)
 # Words that appear in legitimate analytics phrasing we must NOT flag.
 _SAFE_CONTEXT = re.compile(
     r"\b(?:sell-?off|overbought|oversold|buyback|sell-side|buy-side)\b", re.IGNORECASE)
@@ -62,7 +95,8 @@ _ENTITY_NUMERALS = re.compile(
 def violates_guardrail(text: str) -> bool:
     """True if the text contains a transactional imperative aimed at the user."""
     cleaned = _SAFE_CONTEXT.sub("", text)
-    return bool(_IMPERATIVE.search(cleaned))
+    return bool(_IMPERATIVE.search(cleaned) or _ADVISORY.search(cleaned)
+                or _ORDER.search(cleaned))
 
 
 def json_numbers(obj) -> set:
@@ -90,9 +124,14 @@ def _decimals(s: str) -> int:
 
 def _matches_pool(stated: float, decimals: int, pool) -> bool:
     """A stated number matches if some pooled number rounds to it at the stated precision.
-    Sign is forgiven: '-4.2%' and 'down 4.2%' describe the same evidence value."""
-    return any(abs(round(j, decimals) - stated) < 1e-9
-               or abs(abs(round(j, decimals)) - abs(stated)) < 1e-9
+    Sign is forgiven: '-4.2%' and 'down 4.2%' describe the same evidence value.
+
+    Rounding must not change the figure by more than 10%. At zero decimals 2.6 "rounds to 3",
+    so "3x" used to pass against 2.6 - but that is a different claim (15% higher), not a
+    rounding of the same one. Honest roundings of larger figures are nowhere near the limit."""
+    return any((abs(round(j, decimals) - stated) < 1e-9
+                or abs(abs(round(j, decimals)) - abs(stated)) < 1e-9)
+               and abs(abs(j) - abs(stated)) <= 0.10 * abs(j)
                for j in pool)
 
 

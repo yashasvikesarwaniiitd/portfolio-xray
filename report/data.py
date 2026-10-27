@@ -19,6 +19,7 @@ import json
 import os
 from datetime import date, timedelta
 
+import pandas as pd
 import yfinance as yf
 
 import agent
@@ -624,12 +625,28 @@ def section_lookthrough(rows: list[dict], cache: dict, top_n: int = 15,
     }
 
 
-def _beta_of(symbol: str, market_close) -> float | None:
+def _close_by_date(symbol: str):
+    """A symbol's 2y closing series indexed by calendar DATE (no timezone), or None.
+
+    Joined on date, not on the tz-aware timestamp: NSE closes are stamped IST, US closes ET
+    and crypto UTC, so the same trading day carries different timestamps and a timestamp join
+    matches almost nothing across markets."""
     try:
         s = yf.Ticker(symbol).history(period="2y")["Close"]
-        if s.empty:
+    except Exception:
+        return None
+    if s.empty:
+        return None
+    s = s.copy()
+    s.index = pd.to_datetime(s.index).tz_localize(None).normalize()
+    return s
+
+
+def _beta_of(symbol: str, market_close) -> float | None:
+    try:
+        s = _close_by_date(symbol)
+        if s is None or market_close is None:
             return None
-        import pandas as pd
         joined = pd.concat([s.rename("s"), market_close.rename("m")],
                            axis=1, join="inner").dropna()
         rets = joined.pct_change().dropna()
@@ -642,21 +659,22 @@ def _beta_of(symbol: str, market_close) -> float | None:
 
 def section_risk(rows: list[dict], ladder_n: int = 7) -> dict:
     tiers = _group_pcts(rows, lambda r: (r["risk"] or "Unknown").title())
-    try:
-        market = yf.Ticker(agent.NIFTY50_SYMBOL).history(period="2y")["Close"]
-    except Exception:
-        market = None
     ladder, weighted, wsum = [], 0.0, 0.0
-    if market is not None and not market.empty:
-        candidates = [r for r in rows if r["symbol"] and r["source"] in ("yfinance", "crypto")
-                      and r["weight_pct"] > 0]
-        candidates.sort(key=lambda r: -r["weight_pct"])
-        for r in candidates[:ladder_n]:
-            b = _beta_of(r["symbol"], market)
-            if b is not None:
-                ladder.append({"name": r["name"], "beta": b})
-                weighted += b * r["weight_pct"]
-                wsum += r["weight_pct"]
+    benchmarks: dict = {}          # ticker -> closes by date, fetched once per benchmark
+    candidates = [r for r in rows if r["symbol"] and r["source"] in ("yfinance", "crypto")
+                  and r["weight_pct"] > 0]
+    candidates.sort(key=lambda r: -r["weight_pct"])
+    for r in candidates[:ladder_n]:
+        # Each holding is measured against its own market, as `agent.fetch_beta` does: the
+        # NIFTY 50 for Indian listings, the S&P 500 otherwise.
+        bench, _label = agent.benchmark_for(r["symbol"])
+        if bench not in benchmarks:
+            benchmarks[bench] = _close_by_date(bench)
+        b = _beta_of(r["symbol"], benchmarks[bench])
+        if b is not None:
+            ladder.append({"name": r["name"], "beta": b})
+            weighted += b * r["weight_pct"]
+            wsum += r["weight_pct"]
     port_beta = round(weighted / wsum, 2) if wsum else None
     out = {"risk_tiers_pct": tiers, "beta_ladder": sorted(ladder, key=lambda x: -x["beta"]),
            "portfolio_beta_est": port_beta,
@@ -680,21 +698,24 @@ def section_cost(rows: list[dict], cache: dict, total_value: float) -> dict:
                           "weight_pct": r["weight_pct"]})
         else:
             unknown.append(r["name"])
-    weighted = None
+    weighted, covered_value = None, 0.0
     if known:
         wsum = sum(k["weight_pct"] for k in known)
+        covered_value = total_value * wsum / 100
         if wsum:
             weighted = round(sum(k["expense_ratio_pct"] * k["weight_pct"]
                                  for k in known) / wsum, 2)
     out = {"expense_ratios": sorted(known, key=lambda k: -k["expense_ratio_pct"]),
            "ratio_unavailable_for": unknown,
            "weighted_cost_pct_of_covered": weighted,
-           "portfolio_value_for_feedrag": round(total_value, 0),
+           # The value the fee estimate, caption and chart are on: the funds with a known
+           # ratio only. Direct stocks pay no expense ratio, so including them overstated it.
+           "portfolio_value_for_feedrag": round(covered_value, 0),
            "note": "TERs from yfinance where disclosed; Indian MF TERs are not exposed by "
                    "free APIs — marked n/a. Weighted cost covers only funds with a known "
                    "ratio."}
-    if weighted and total_value:
-        out["fees_10yr_est"] = round(total_value * ((1 + weighted / 100) ** 10 - 1), 0)
+    if weighted and covered_value:
+        out["fees_10yr_est"] = round(covered_value * ((1 + weighted / 100) ** 10 - 1), 0)
     return out
 
 

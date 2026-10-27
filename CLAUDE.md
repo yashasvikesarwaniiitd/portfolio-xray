@@ -56,6 +56,10 @@ reconstructed, and it can express SELLS, which the SIP sheet cannot.
 - The benchmark is like-for-like: the same dated flows replayed into NIFTY 50
   (`agent.index_equivalent_xirr`). Index levels (symbols starting `^`) are never converted
   to rupees - doing so once reported the index as rising over a window in which it fell.
+- Every reading of a holding goes through `reconstruct_holding`, which reads the transactions:
+  Sharpe and the weekly digest once rebuilt units from `inflows` (buys only) and valued a fully
+  sold holding as live. A status is read for its negation ("Not executed" is not executed), and a
+  label with a redemption word is a SELL even if it also says SIP.
 - Cost uses the statement's amount paid when it agrees with units x price to within 1%.
 - A portfolio is a sequence of PARTS (`portfolio_merge.PART_DELIM`), one per source file,
   read by their own parser and combined by `agent.read_portfolio`. Adding a file merges
@@ -69,6 +73,9 @@ reconstructed, and it can express SELLS, which the SIP sheet cannot.
   sample. Remove deletes the saved copy too, or it would return on refresh.
 
 ## Currency and benchmarks
+- The report's beta is `agent.benchmark_for` per holding, joined on date - one rule, not a copy.
+  The 10-year fee estimate is on the funds with a known fee, never the whole portfolio.
+  The USD/INR cache tracks the date range it holds and refetches outside it.
 - Portfolio maths is in INR. Dollar-quoted holdings (US tickers, crypto pairs) are
   converted in `_price_map` at each date's USD/INR rate - without it, units are
   `rupees / dollar price`, which is a ratio rather than a share count, and the currency
