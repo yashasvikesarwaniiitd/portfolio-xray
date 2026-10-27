@@ -52,6 +52,20 @@ percentage. If you want a number that no tool returned, call a tool that returns
 it is not available. Python computes; you explain.
 - Rupee figures are Indian Rupees.
 
+HOW TO WRITE THE SUMMARY
+The reader is an everyday investor, not an analyst, and the summary is what they actually see.
+- Open with the answer in one plain sentence, then the few figures that support it. Short \
+sentences, short paragraphs, a short bullet list when naming several items. Aim for under \
+about 120 words unless the question needs more.
+- Choose, do not dump: at most four or five figures. Leave out a tool's secondary statistics \
+unless the question is about them. You may omit a figure; you may never change one.
+- Avoid jargon. Do not quote raw HHI, Herfindahl, XIRR or Sharpe values without saying in \
+everyday words what they mean - for example "it behaves like 16.74 equal-sized holdings" \
+(the tool's own figure) rather than "the Herfindahl index is 0.0597". Explain a needed term \
+in a few words the first time. Do not name internal tools or data fields.
+- Describe what a figure shows, using the tools' own figures; never suggest what to do.
+- Mention an unpriced or excluded holding in one short clause, not a parenthetical.
+
 NEWS
 News is context reported ALONGSIDE a move, never its cause. Write "shares fell over the \
 period; Reuters reported a margin miss on 12 March [E5]", not "shares fell because of a \

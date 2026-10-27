@@ -857,3 +857,13 @@ def test_an_unsourced_number_fault_is_named_in_the_rewrite_request():
     ask = _rewrite_request(llm)
     assert "{" not in ask and "}" not in ask, ask
     assert "61.4" in ask and "absent from the evidence" in ask
+
+
+def test_the_investigator_prompt_carries_the_plain_language_guide_and_keeps_the_hard_rules():
+    """The chat's analytics answers come from the Investigator, so its prompt - not the legacy
+    one in agent.py - is where readability has to be asked for. The rules that outrank it stay."""
+    from xray_agent.application import prompts
+    s = prompts.SYSTEM
+    assert "HOW TO WRITE THE SUMMARY" in s and "Avoid jargon" in s
+    assert "NEVER do arithmetic yourself" in s
+    assert "never suggest what to do" in s
