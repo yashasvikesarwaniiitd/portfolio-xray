@@ -248,9 +248,12 @@ def candidate_pool(name: str, master: dict, max_extra: int = 6) -> list:
     return sorted(pool, key=lambda cn: len(compact(cn[1])))[:max_extra]
 
 
-def _verify_one(name: str, txns: list, master: dict, nav_fn, detail_fn) -> dict:
+def _verify_one(name: str, txns: list, master: dict, nav_fn, detail_fn, pool=None) -> dict:
+    """Verify `name` against `pool` - [(code, scheme_name)] - or, if none is given, against the
+    candidates found in `master`. A one-entry pool is how a REMEMBERED match is re-checked."""
     parts = split_scheme_name(name)
-    pool = candidate_pool(name, master)
+    if pool is None:
+        pool = candidate_pool(name, master)
     if not pool:
         return {"error": f"no AMFI scheme looks like {parts['core']!r}", **parts}
     scored = []
@@ -299,8 +302,39 @@ def _verify_one(name: str, txns: list, master: dict, nav_fn, detail_fn) -> dict:
             "untestable": nav_untestable(nav_fn(chosen[2]), txns)}
 
 
+_MATCH_MEMORY: dict = {}      # name_key -> {"code", "scheme_name"}, for this process
+
+
+def match_key(name: str) -> str:
+    """What identifies a fund NAME for remembering its match. The statement's full name,
+    compacted - plan and option words included, because Direct and Regular are different
+    schemes with different codes."""
+    return compact(name)
+
+
+class DbMatchStore:
+    """Remembered matches in the database (see storage.fund_matches_*). A failure to reach it
+    returns "nothing remembered", which costs only the slower path this exists to avoid."""
+
+    def get(self, keys):
+        import storage
+        return storage.fund_matches_get(list(keys))
+
+    def put(self, items):
+        import storage
+        return storage.fund_matches_put(list(items))
+
+
+def _default_store():
+    try:
+        import storage
+        return DbMatchStore() if storage.configured() else None
+    except Exception:
+        return None
+
+
 def resolve_holdings(holdings: list, search_fn=None, master_fn=None, nav_fn=None,
-                     detail_fn=None) -> list:
+                     detail_fn=None, match_store=None) -> list:
     """Fill in symbol/source for holdings that have no price source, in place.
 
     Each fund is matched to an AMFI scheme AND verified against the NAVs its own statement
@@ -308,22 +342,34 @@ def resolve_holdings(holdings: list, search_fn=None, master_fn=None, nav_fn=None
     unpriced) rather than priced against the wrong scheme. Passing `search_fn` selects the
     legacy name-only behaviour, which exists for callers with no NAV data.
 
+    A verified match is REMEMBERED (in this process, and in the database when one is
+    configured), so a later request re-checks only that one scheme against the statement
+    instead of searching and verifying every candidate. It is still verified every time - a
+    remembered match that no longer fits the NAVs falls back to the full search - so the
+    memory can only make this faster, never make a wrong match stick. When every fund has a
+    remembered match the 14,000-scheme fund list is not even loaded.
+
     Returns a note per holding describing what happened - resolution is a judgement made on
     the user's behalf, so it should be visible rather than silent.
     """
     if search_fn is not None:
         return _resolve_by_name(holdings, search_fn)
     import agent
+    # The database memory is for the real services only. A caller that injects its own master
+    # list (a test) must never reach a real database by accident.
+    production = master_fn is None and match_store is None
+    # The in-process memory follows the same rule: on for the real services, and for a caller
+    # that supplies a store on purpose, but off for one that only injects a fund list - or one
+    # test's remembered match would leak into the next test's.
+    use_memory = production or match_store is not None
     master_fn = master_fn or agent.scheme_master
     injected_nav_fn = nav_fn
     detail_fn = detail_fn or agent.scheme_full_name
+    if match_store is None and production:
+        match_store = _default_store()
     todo = [h for h in holdings if not h.get("source") and h.get("name")]
     if not todo:
         return []
-    try:
-        master = master_fn()
-    except Exception as e:
-        return [f"{h['name']}: AMFI lookup failed ({e})" for h in todo]
 
     def nav_fn_for(h):
         """How to fetch a candidate's NAVs for THIS holding: only the window its purchases
@@ -337,26 +383,80 @@ def resolve_holdings(holdings: list, search_fn=None, master_fn=None, nav_fn=None
         return lambda code: agent.nav_window(code, lo, hi)
 
     todo = [h for h in todo if h.get("transactions") or injected_nav_fn is not None]
-    # One fund can be held in several holding rows, and every candidate's NAVs are a network
-    # call, so warm them in parallel before any verification reads them.
+    # One fund can be held in several holding rows; match each NAME once.
     by_name: dict = {}
     for h in todo:
         by_name.setdefault(h["name"].strip().lower(), h)
-    jobs = [(nav_fn_for(h), code)
-            for h in by_name.values() for code, _ in candidate_pool(h["name"], master)]
-    if len(jobs) > 1:
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=6) as ex:
-            list(ex.map(lambda j: _safe(j[0], j[1]), jobs))
+    keys = {n: match_key(h["name"]) for n, h in by_name.items()}
+
+    def prefetch(jobs):
+        """Every scheme's NAVs are a network call: warm them in parallel before any
+        verification reads them."""
+        if len(jobs) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                list(ex.map(lambda j: _safe(j[0], j[1]), jobs))
+
+    # 1. What is already known: this process first, then the database.
+    remembered = ({k: _MATCH_MEMORY[k] for k in keys.values() if k in _MATCH_MEMORY}
+                  if use_memory else {})
+    unknown = [k for k in keys.values() if k not in remembered]
+    if match_store is not None and unknown:
+        try:
+            found = match_store.get(unknown) or {}
+        except Exception:
+            found = {}
+        if use_memory:
+            _MATCH_MEMORY.update(found)
+        remembered.update(found)
+
+    # 2. A remembered match is re-verified against its ONE scheme.
+    results: dict = {}
+    hinted = {n: remembered[k] for n, k in keys.items() if k in remembered}
+    prefetch([(nav_fn_for(by_name[n]), hint["code"]) for n, hint in hinted.items()])
+    needs_search = [n for n in by_name if n not in hinted]
+    for n, hint in hinted.items():
+        h = by_name[n]
+        r = _verify_one(h["name"], h.get("transactions") or [], {}, nav_fn_for(h), detail_fn,
+                        pool=[(hint["code"], hint["scheme_name"])])
+        if r.get("error"):
+            _MATCH_MEMORY.pop(keys[n], None)      # no longer fits: forget it, search afresh
+            needs_search.append(n)
+        else:
+            results[n] = r
+
+    # 3. Everything else gets the full search. The fund list is loaded only now, and only if
+    #    something actually needs it.
+    if needs_search:
+        try:
+            master = master_fn()
+        except Exception as e:
+            for n in needs_search:
+                results[n] = {"error": f"AMFI lookup failed ({e})"}
+            needs_search = []
+    if needs_search:
+        prefetch([(nav_fn_for(by_name[n]), code) for n in needs_search
+                  for code, _ in candidate_pool(by_name[n]["name"], master)])
+        for n in needs_search:
+            h = by_name[n]
+            results[n] = _verify_one(h["name"], h.get("transactions") or [], master,
+                                     nav_fn_for(h), detail_fn)
+
+    # 4. Remember what was newly verified. Written in the background: it is a head start for
+    #    the NEXT request and must not delay this one by a database round trip.
+    fresh = [(keys[n], results[n]["fund_code"], results[n]["scheme_name"])
+             for n in needs_search if n in results and not results[n].get("error")]
+    if use_memory:
+        for k, code, name in fresh:
+            _MATCH_MEMORY[k] = {"code": str(code), "scheme_name": name}
+    if match_store is not None and fresh:
+        import threading
+        threading.Thread(target=lambda: _safe(match_store.put, fresh), daemon=True).start()
 
     notes: list = []
-    cache: dict = {}
     for h in todo:
         key = h["name"].strip().lower()
-        if key not in cache:
-            cache[key] = _verify_one(h["name"], h.get("transactions") or [], master,
-                                     nav_fn_for(h), detail_fn)
-        r = cache[key]
+        r = results[key]
         if r.get("error"):
             notes.append(f"{h['name']}: {r['error']}")
             continue

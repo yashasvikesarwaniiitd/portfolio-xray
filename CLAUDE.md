@@ -36,7 +36,13 @@ reconstructed, and it can express SELLS, which the SIP sheet cannot.
   history: downloading 38 full histories made a first analysis take ~115s on the free
   tier, past the host proxy's ~100s limit, so the user got the proxy's HTML error page.
   The frontend warms the backend on page open (`/warm`) and never shows a non-JSON reply
-  as an error message (`uiformat.describe_http_failure`). A fund that cannot be verified
+  as an error message (`uiformat.describe_http_failure`). A verified fund match is remembered
+  (process memory + the `fund_match` table) and re-verified against its one scheme on later
+  requests; a remembered match that stops fitting falls back to the full search, so memory
+  can only make this faster. /analysis prices each holding once (`valued=` into
+  `holdings_with_weights`) and caches a COMPLETE result for 10 minutes in memory only.
+  Tests never reach a real database: the root `conftest.py` removes the DB env vars for
+  everything except `regression` tests. A fund that cannot be verified
   is left unpriced, never priced on a guess. A name-only match once priced a fund on a
   different (index) fund whose NAV was ~30x smaller and fabricated a ~96% loss on it.
   Candidates come from contiguous containment on the compacted name, so "Small Cap" and

@@ -11,9 +11,13 @@ Public-hardening (non-negotiable):
 
 Run: uv run uvicorn api:app --host 0.0.0.0 --port 8000
 """
+import hashlib
 import os
 import sqlite3
 import tempfile
+import threading
+import time
+from collections import OrderedDict
 from datetime import date
 
 import anthropic
@@ -47,6 +51,46 @@ def client() -> anthropic.Anthropic:
     if _client is None:
         _client = anthropic.Anthropic()
     return _client
+
+
+# --- repeat-analysis cache ------------------------------------------------------------
+# Opening a portfolio, refreshing the page (which reopens the saved one), switching back to it
+# and every "update" each run the whole analysis again, and that is minutes of market-data
+# downloads on a free-tier host for an answer that has not changed. So an identical request
+# gets the previous answer for a few minutes.
+#
+# What this keeps, and for how long: the computed result of a recent request, in THIS
+# process's memory, under a SHA-256 of the file's bytes. Not written to disk or the database,
+# gone on restart, at most ANALYSIS_CACHE_MAX entries, and none older than the TTL is ever
+# served. It is deliberately short: prices move, and a result describing a market ten minutes
+# ago is fine where one from yesterday is not.
+ANALYSIS_CACHE_TTL = 600
+ANALYSIS_CACHE_MAX = 16
+_analysis_cache: "OrderedDict[str, tuple]" = OrderedDict()
+_analysis_lock = threading.Lock()
+
+
+def _cache_get(key: str) -> dict | None:
+    now = time.time()
+    with _analysis_lock:
+        hit = _analysis_cache.get(key)
+        if hit is None:
+            return None
+        stored_at, result = hit
+        if now - stored_at > ANALYSIS_CACHE_TTL:
+            _analysis_cache.pop(key, None)
+            return None
+        _analysis_cache.move_to_end(key)
+        # Say how old it is, so the answer is honest about being a repeat.
+        return {**result, "cache_age_s": int(now - stored_at)}
+
+
+def _cache_put(key: str, result: dict) -> None:
+    with _analysis_lock:
+        _analysis_cache[key] = (time.time(), result)
+        _analysis_cache.move_to_end(key)
+        while len(_analysis_cache) > ANALYSIS_CACHE_MAX:
+            _analysis_cache.popitem(last=False)
 
 
 # --- rate limiting (SQLite counter by IP, per UTC day) --------------------------------
@@ -289,6 +333,20 @@ async def analysis(request: Request, file: UploadFile | None = None):
     timeline + the report engine's computed sections (allocation, diversification,
     concentration, overlap, cost, questions) + a market reference. No LLM, so it's free to
     serve — the AI only ever appears in /chat and the Excel report's insight blocks."""
+    key = None
+    try:
+        if file is not None:
+            raw = await file.read()
+            await file.seek(0)               # _portfolio_path_from reads it again
+            key = "upload:" + hashlib.sha256(raw).hexdigest()
+        else:
+            key = f"default:{agent.DEFAULT_PORTFOLIO}:{os.path.getmtime(agent.DEFAULT_PORTFOLIO)}"
+    except Exception:
+        key = None                           # no key means no caching, never an error
+    if key:
+        hit = _cache_get(key)
+        if hit is not None:
+            return hit
     try:
         path, is_temp = await _portfolio_path_from(request, file)
     except ValueError as e:
@@ -308,7 +366,9 @@ async def analysis(request: Request, file: UploadFile | None = None):
 
         level = report_data.detect_level(holdings)
         cache = report_data._load_cache()
-        wrows = report_data.holdings_with_weights(holdings, level)
+        # `rows` already holds every holding's valuation; passing it stops them being priced a
+        # second time here.
+        wrows = report_data.holdings_with_weights(holdings, level, valued=rows)
         total_value = sum(r["value"] for r in wrows)
 
         def safe(fn, *a):
@@ -331,7 +391,7 @@ async def analysis(request: Request, file: UploadFile | None = None):
 
         first = min((date(y, m, 1) for h in holdings for (y, m, _) in h["inflows"]),
                     default=None)
-        return {
+        result = {
             "level": level,
             "snapshot": snap,
             "timeline": agent.portfolio_timeline(captures) if captures else [],
@@ -344,6 +404,14 @@ async def analysis(request: Request, file: UploadFile | None = None):
             "holdings_closed": snap["closed_count"],
             "skipped_rows": skipped,
         }
+        # Cache only a COMPLETE answer. A transient failure - a price download that errored,
+        # a market reference that came back empty - would otherwise be served for the whole
+        # TTL, so retrying would reproduce the hiccup instead of fixing it.
+        transient = any(str(r.get("reason", "")).startswith(
+            ("price fetch", "valuation from statement failed")) for r in rows)
+        if key and result["market"] is not None and not transient:
+            _cache_put(key, result)
+        return result
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     except Exception as e:

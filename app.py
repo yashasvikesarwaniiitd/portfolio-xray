@@ -211,7 +211,7 @@ def saved_delete(pid: str) -> None:
 # ---------------------------------------------------------------- formatting helpers
 
 # Formatting lives in uiformat.py — pure and unit-tested (no Streamlit import).
-from uiformat import describe_http_failure, inr, md_to_html, pct  # noqa: E402
+from uiformat import describe_http_failure, inr, md_to_html, pct, progress_message  # noqa: E402
 
 
 # ---------------------------------------------------------------- design system (CSS)
@@ -795,6 +795,37 @@ def unique_name(base: str) -> str:
     return f"{name} ({i})"
 
 
+def call_json_progress(method: str, path: str, kind: str, **kw):
+    """call_json, with a live status line while it runs.
+
+    The request runs in a worker thread and this thread - the only one allowed to draw -
+    refreshes the message every half second. `call()` can only write its "waking the server"
+    caption AFTER the response arrives, which made it useless: during a 90-second wait the
+    person saw one unchanging spinner and no explanation. The worker makes no Streamlit
+    calls, which is what makes this safe.
+    """
+    box: dict = {}
+
+    def work():
+        try:
+            box["r"] = call_json(method, path, None, **kw)
+        except Exception as e:           # never leave the main thread waiting on a dead worker
+            box["r"] = (0, {"error": str(e)})
+
+    holder = st.empty()
+    with holder:
+        status = st.status(progress_message(0, kind), state="running")
+    t0 = time.time()
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    while worker.is_alive():
+        worker.join(timeout=0.5)
+        waited = time.time() - t0
+        status.update(label=f"{progress_message(waited, kind)}  ·  {int(waited)}s")
+    holder.empty()
+    return box.get("r", (0, {"error": UNREACHABLE}))
+
+
 def load_analysis(csv_text: str | None, label: str, name: str | None = None,
                   replace: str | None = None, pid: str | None = None) -> bool:
     """True if the portfolio loaded. The caller MUST NOT rerun on False.
@@ -804,16 +835,13 @@ def load_analysis(csv_text: str | None, label: str, name: str | None = None,
     dead button: click, nothing happens, no reason given. Streamlit has no other way to keep
     a message on screen; surviving the rerun is the whole mechanism.
     """
-    slot = st.empty()
-    with st.spinner("Reconstructing units from your SIP history, then valuing at today's "
-                    "prices…"):
-        if csv_text:
-            code, data = call_json("POST", "/analysis", cold_slot=slot,
-                                   files={"file": ("portfolio.csv", csv_text.encode(),
-                                                   "text/csv")})
-        else:
-            code, data = call_json("GET", "/analysis", cold_slot=slot)
-    slot.empty()
+    kind = "sample" if not csv_text else ("saved" if label == "Saved portfolio" else "file")
+    if csv_text:
+        code, data = call_json_progress("POST", "/analysis", kind,
+                                        files={"file": ("portfolio.csv", csv_text.encode(),
+                                                        "text/csv")})
+    else:
+        code, data = call_json_progress("GET", "/analysis", kind)
     if code == 200 and "snapshot" in data:
         # `replace` names an EXISTING portfolio to overwrite in place (an update after
         # merging a file in), so it keeps its slot in the switcher and its saved id rather

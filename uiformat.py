@@ -128,3 +128,33 @@ def describe_http_failure(code: int, body: bytes | str) -> str | None:
         return SLOW_SERVER_NOTE
     return None
 
+
+_FIRST_MESSAGE = {
+    "sample": "Loading the sample portfolio…",
+    "saved": "Reopening your saved portfolio…",
+    "file": "Reading your file and valuing it at today's prices…",
+}
+
+
+def progress_message(elapsed: float, kind: str = "file") -> str:
+    """What to tell someone who is waiting for an analysis, by how long they have waited.
+
+    The old spinner said "Reconstructing units from your SIP history" for everything - a
+    broker statement, the sample, a saved portfolio - none of which have a SIP history to
+    reconstruct, and it said the same thing for a minute and a half. A long wait with no
+    explanation looks like a hang. This is honest about the two real causes of a slow first
+    run (the free-tier server waking up, and matching funds against fund-house data) and
+    says that later runs are quick, so a person knows whether to wait.
+    """
+    if elapsed < 4:
+        return _FIRST_MESSAGE.get(kind, _FIRST_MESSAGE["file"])
+    if elapsed < 15:
+        return ("Still working. If the server had been idle it is waking up (free tier), "
+                "which takes up to about 40 seconds.")
+    if elapsed < 60:
+        return ("Waking the server and fetching today's prices - and, for funds, matching "
+                "them against fund-house NAV data. The first run after idle is the slow "
+                "one; the next ones are quick.")
+    return ("Nearly there - this is a long first run. If it fails, wait a minute and try "
+            "again; the server keeps working in the background.")
+

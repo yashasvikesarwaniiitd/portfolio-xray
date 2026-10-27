@@ -268,6 +268,78 @@ def update(owner_key: str, pid: str, name: str | None = None,
         return False
 
 
+# --- verified fund matches ---------------------------------------------------------------------
+#
+# A fund on a statement is matched to an AMFI scheme code by checking candidate schemes' NAVs
+# against the NAVs the statement recorded (see fund_resolver). On a free-tier host the process
+# is thrown away after ~15 minutes idle, and with it the in-memory record of those matches, so
+# every first request after a sleep re-verified up to 38 candidate schemes: ~44s, on top of
+# the ~30-50s the host takes to wake. A verified match is stable - "Kotak Small Cap Fund Direct
+# Growth" does not change scheme - so it is kept here, and on a later request only the ONE
+# remembered scheme is re-checked, not all the candidates.
+#
+# This table holds PUBLIC data only: a scheme name as printed on a statement and the AMFI code
+# it resolved to. No amounts, dates, units or owner key. It is keyed by name, not by user, so
+# one person's verification saves the next person's.
+
+FUND_MATCH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS fund_match (
+    name_key     TEXT PRIMARY KEY,
+    code         TEXT NOT NULL,
+    scheme_name  TEXT NOT NULL,
+    verified_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
+_fund_table_ready = False
+
+
+def _ensure_fund_table(conn) -> None:
+    """Create the table on first use in this process, so no deploy step has to remember to."""
+    global _fund_table_ready
+    if not _fund_table_ready:
+        conn.execute(FUND_MATCH_SCHEMA)
+        _fund_table_ready = True
+
+
+def fund_matches_get(keys: list) -> dict:
+    """{name_key: {"code", "scheme_name"}} for the keys that have a remembered match.
+    Empty on any failure: a missing memory only costs the slower path it replaces."""
+    keys = [k for k in keys if k]
+    if not (configured() and keys):
+        return {}
+    try:
+        with _connect() as conn:
+            _ensure_fund_table(conn)
+            rows = conn.execute(
+                "SELECT name_key, code, scheme_name FROM fund_match WHERE name_key = ANY(%s)",
+                (keys,)).fetchall()
+        return {r[0]: {"code": r[1], "scheme_name": r[2]} for r in rows}
+    except Exception:
+        return {}
+
+
+def fund_matches_put(items: list) -> bool:
+    """Remember [(name_key, code, scheme_name), ...]. Only well-formed entries are kept: the
+    code must be digits (an AMFI scheme code) and the key a sane length, so this cannot be
+    used to fill the table with arbitrary text."""
+    good = [(k, c, n) for k, c, n in items
+            if k and len(k) <= 200 and str(c).isdigit() and n and len(n) <= 300]
+    if not (configured() and good):
+        return False
+    try:
+        with _connect() as conn:
+            _ensure_fund_table(conn)
+            for k, c, n in good:
+                conn.execute(
+                    "INSERT INTO fund_match (name_key, code, scheme_name) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (name_key) DO UPDATE SET code = EXCLUDED.code, "
+                    "scheme_name = EXCLUDED.scheme_name, verified_at = now()",
+                    (k, str(c), n))
+        return True
+    except Exception:
+        return False
+
+
 def delete(owner_key: str, pid: str) -> bool:
     if not (configured() and owner_key and pid):
         return False

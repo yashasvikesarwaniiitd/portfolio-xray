@@ -119,10 +119,17 @@ def fetch_meta(symbol: str, cache: dict) -> dict:
 
 # --- weights ---------------------------------------------------------------------------
 
-def holdings_with_weights(holdings: list[dict], level: str) -> list[dict]:
+def holdings_with_weights(holdings: list[dict], level: str,
+                          valued: list[dict] | None = None) -> list[dict]:
     """Attach a weight_pct to each holding. L2: weight by reconstructed current value;
     L1: weight by amount invested (documented in Methodology). Unpriced/zero rows keep
     weight 0 and are reported, never silently dropped.
+
+    `valued` is the result of agent.reconstruct_holding for each holding, in the same order,
+    when the caller has already computed it. Valuing a holding means a price download, and
+    /analysis valued every holding for the snapshot and then, through here, valued every one
+    AGAIN - 51 market-data calls for 25 stocks. Passing the rows it already has costs nothing;
+    omitting it keeps the old behaviour for callers that have none.
 
     That last sentence was not true at L2 until now. The invested-amount fallback below is
     the L1 basis — at L1 there are no prices at all, so invested IS the measure and every
@@ -143,13 +150,15 @@ def holdings_with_weights(holdings: list[dict], level: str) -> list[dict]:
     keeps weight 0 and is still carried in `rows` with priced=False, so the holdings table
     and the "could not be valued" card report it exactly as before.
     """
+    if valued is not None and len(valued) != len(holdings):
+        valued = None        # misaligned: recompute rather than weight the wrong holdings
     rows = []
-    for h in holdings:
+    for i, h in enumerate(holdings):
         base = {"name": h["name"], "symbol": h["symbol"], "source": h["source"],
                 "type": h["type"], "market": h["market"], "risk": h["risk"],
                 "value": 0.0, "priced": False, "closed": False}
         if level == "L2":
-            r = agent.reconstruct_holding(h)
+            r = valued[i] if valued is not None else agent.reconstruct_holding(h)
             base["closed"] = r.get("status") == "closed"
             if r.get("status") == "priced":
                 base["value"] = r["current_value"]
