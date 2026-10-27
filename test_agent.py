@@ -147,3 +147,26 @@ def test_read_portfolio_missing_column_raises(tmp_path):
     path = _write(tmp_path, "Where,symbol\nAshoka,ASHOKA.NS\n")
     with pytest.raises(ValueError, match="missing required column"):
         read_portfolio(path)
+
+
+@pytest.mark.regression
+def test_get_nav_reads_a_real_nav_rather_than_a_fragment_of_the_scheme_name():
+    """`get_nav` was returning a tool error in production and nobody noticed, because the
+    old chat loop handed tool errors to the model, which wrote around them.
+
+    mftool's get_scheme_quote parses AMFI's row positionally, and AMFI widened the
+    scheme-name field - the same change that took the Direct/Regular qualifier out of the
+    master list. For 120503 it yields nav='Direct Plan', so float() raised. fetch_nav now
+    reads the historical feed, as _price_map always has.
+
+    Live, because the bug was in what the feed sends, and only the feed can prove it fixed.
+    """
+    import json
+
+    import agent
+    out = json.loads(agent.fetch_nav("122639"))         # Parag Parikh Flexi Cap, Direct Growth
+    assert isinstance(out["nav"], float) and out["nav"] > 0
+    assert "Parag Parikh" in out["scheme_name"]
+    # the qualifier belongs IN the name, not in the fields either side of it
+    assert "Direct" in out["scheme_name"]
+    assert len(out["as_of"]) == 10 and out["as_of"][4] == "-"

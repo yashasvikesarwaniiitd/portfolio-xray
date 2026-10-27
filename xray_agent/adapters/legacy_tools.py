@@ -111,6 +111,12 @@ def _parse_day(value, label: str) -> date:
 # Deliberately a subset of agent.TOOLS: the report builder and the weekly digest are long
 # fixed pipelines of their own, and handing an agent on a step budget a tool that takes a
 # minute and writes a file is a good way to waste the whole budget on one call.
+#
+# The four single-value lookups (get_price, get_index, get_return, get_nav) were missing for
+# a different reason: nobody ported them, because an investigation into why a portfolio
+# moved never needs them. The chat path does - "what is the NAV of Parag Parikh?" is the
+# README's own example - and it could not be answered here at all until this loop started
+# serving chat too. Their exclusion was an accident; the two above are a decision.
 
 SCHEMAS = [
     {
@@ -242,6 +248,58 @@ SCHEMAS = [
             "required": ["query"],
         },
     },
+    # --- single-value lookups, carried over verbatim from agent.TOOLS -----------------------
+    {
+        "name": "get_price",
+        "description": "Get the latest closing price for a stock by its yfinance ticker "
+                       "symbol, e.g. RELIANCE.NS or INFY.NS for NSE stocks, AAPL for US.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"ticker": {"type": "string",
+                                      "description": "yfinance ticker symbol"}},
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_index",
+        "description": "Get the latest level of a market index. Currently only the "
+                       "NIFTY 50 is supported.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string",
+                                    "description": "Index name, e.g. 'NIFTY 50'"}},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "get_return",
+        "description": "Get the percentage return of ONE stock or index over a period, "
+                       "computed from closing prices. Use ticker '^NSEI' for the NIFTY 50 "
+                       "index. To compare two instruments, use compare_returns instead.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "yfinance ticker symbol"},
+                "period": {"type": "string",
+                           "enum": ["5d", "1mo", "3mo", "6mo", "ytd", "1y"],
+                           "description": "Lookback period"},
+            },
+            "required": ["ticker", "period"],
+        },
+    },
+    {
+        "name": "get_nav",
+        "description": "Get the latest NAV (net asset value) of an Indian mutual fund by "
+                       "its AMFI scheme code (e.g. 120503), sourced from the AMFI daily "
+                       "NAV feed.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"fund_code": {"type": "string",
+                                         "description": "AMFI mutual fund scheme code, "
+                                                        "e.g. '120503'"}},
+            "required": ["fund_code"],
+        },
+    },
 ]
 
 
@@ -293,6 +351,16 @@ class LegacyTools:
             return agent.fetch_news_tool(args["query"])
         if name == "search_fund":
             return agent.search_fund(args["query"])
+        if name == "get_price":
+            return agent.fetch_close(args["ticker"])
+        if name == "get_index":
+            # The schema takes a name for the model's benefit; only one index is wired, and
+            # agent.run_tool ignored the argument in exactly the same way.
+            return agent.fetch_close(agent.NIFTY50_SYMBOL)
+        if name == "get_return":
+            return json.dumps(agent.compute_return(args["ticker"], args["period"]))
+        if name == "get_nav":
+            return agent.fetch_nav(args["fund_code"])
         raise ValueError(f"unknown tool: {name}")
 
     # --- implementations ------------------------------------------------------------------

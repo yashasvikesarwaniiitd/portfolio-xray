@@ -1284,17 +1284,29 @@ def _disambiguate_plans(hits: list[dict], max_lookups: int = 8) -> bool:
 
 
 def fetch_nav(fund_code: str) -> str:
+    """Latest NAV, read from the historical feed rather than mftool's quote endpoint.
+
+    `get_scheme_quote` parses AMFI's row positionally, and AMFI widened the scheme-name
+    field — the same change that took the Direct/Regular qualifier out of the master list.
+    For 120503 it returns nav='Direct Plan' and last_updated='Growth Option' while the
+    actual NAV falls off the end, so `float(quote["nav"])` raised ValueError and every
+    "what is the NAV of X" answered with a tool error. _price_map has always read the
+    historical feed, which is why portfolio valuation kept working while this did not.
+    """
     code = str(fund_code).strip()
-    quote = _mf().get_scheme_quote(code)  # returns None for an unknown code
-    if not quote:
+    raw = _mf().get_scheme_historical_nav(code) or {}
+    rows = [r for r in (raw.get("data") or []) if r.get("nav") not in (None, "", "N.A.")]
+    if not rows:
         raise ValueError(
             f"No NAV found for fund code '{code}'. Check the AMFI scheme code."
         )
+    # Newest first in practice, but ordering is the feed's business, not ours.
+    latest = max(rows, key=lambda r: datetime.strptime(r["date"], "%d-%m-%Y"))
     return json.dumps({
-        "fund_code": str(quote.get("scheme_code", code)),
-        "scheme_name": quote.get("scheme_name"),
-        "nav": float(quote["nav"]),
-        "as_of": quote.get("last_updated"),
+        "fund_code": str(raw.get("scheme_code", code)),
+        "scheme_name": raw.get("scheme_name"),
+        "nav": float(latest["nav"]),
+        "as_of": datetime.strptime(latest["date"], "%d-%m-%Y").date().isoformat(),
     })
 
 
@@ -1377,33 +1389,54 @@ def run_tool(name: str, args: dict,
         return f"Error: {e}", True
 
 
-def turn(client: anthropic.Anthropic, messages: list, tools: list | None = None,
-         tools_used: list | None = None, usage=None,
-         path: str = DEFAULT_PORTFOLIO) -> str:
-    """Run the tool-calling loop until the model answers in text. `tools` defaults to the
-    full tool set; pass [] for a no-tools turn (education). Tool names actually called are
-    appended to `tools_used` if provided (used by the eval harness for tool-correctness).
-    Token usage from each model call is recorded on `usage` if provided."""
-    tools = TOOLS if tools is None else tools
-    while True:
-        kwargs = {"model": MODEL, "max_tokens": 1024, "system": SYSTEM, "messages": messages}
-        if tools:
-            kwargs["tools"] = tools
-        resp = client.messages.create(**kwargs)
-        if usage is not None:
-            usage.add(MODEL, resp)
-        messages.append({"role": "assistant", "content": resp.content})
-        if resp.stop_reason != "tool_use":
-            return next((b.text for b in resp.content if b.type == "text"), "")
-        results = []
-        for block in resp.content:
-            if block.type == "tool_use":
-                if tools_used is not None:
-                    tools_used.append(block.name)
-                content, is_error = run_tool(block.name, block.input, path)
-                results.append({"type": "tool_result", "tool_use_id": block.id,
-                                "content": content, "is_error": is_error})
-        messages.append({"role": "user", "content": results})
+# The analytics branch's budget. Not the Investigator's default (12 steps / Rs 10 / 120s):
+# someone is watching a spinner in a browser, and a chat turn that takes two minutes is a
+# worse answer than a partial one that takes twenty seconds. Running out is not a failure -
+# the loop spends one more turn summarising what it verified and marks the result partial.
+CHAT_BUDGET_STEPS = 6
+CHAT_BUDGET_INR = 2.0
+CHAT_BUDGET_SECONDS = 45.0
+
+
+def answer_without_tools(client: anthropic.Anthropic, messages: list, usage=None) -> str:
+    """One model call, no tools — the education path.
+
+    This is not a loop and never was: with an empty tool list the old `turn` could not
+    receive a tool_use stop reason, so it returned after exactly one call. Writing that out
+    as a single call is what lets the tool loop be deleted rather than kept alive for a
+    branch that never used it.
+    """
+    resp = client.messages.create(model=MODEL, max_tokens=1024, system=SYSTEM,
+                                  messages=messages)
+    if usage is not None:
+        usage.add(MODEL, resp)
+    text = next((b.text for b in resp.content if b.type == "text"), "")
+    messages.append({"role": "assistant", "content": resp.content})
+    return text
+
+
+def run_investigator(client: anthropic.Anthropic, user_text: str, path: str,
+                     route: dict, usage=None, history: list | None = None):
+    """The analytics branch. Returns the Investigator's RunState.
+
+    Imported inside the function because xray_agent.adapters.legacy_tools imports THIS
+    module: at module scope the two would deadlock on each other at import time.
+
+    No run store is passed, so it defaults to NoopRunStore. That is deliberate and load
+    bearing: investigation_runs records the question and summary verbatim, and the chat is
+    a deployed endpoint that promises nothing is stored. The CLI, which is not deployed,
+    passes a SqliteRunStore and keeps its history.
+    """
+    from xray_agent.adapters.anthropic_llm import AnthropicLLM
+    from xray_agent.adapters.legacy_tools import LegacyTools
+    from xray_agent.application.investigator import Investigator
+    from xray_agent.domain.models import Budget
+
+    budget = Budget(max_steps=CHAT_BUDGET_STEPS, max_cost_inr=CHAT_BUDGET_INR,
+                    max_seconds=CHAT_BUDGET_SECONDS)
+    investigator = Investigator(AnthropicLLM(client, model=MODEL), LegacyTools(path),
+                                budget=budget, usage=usage)
+    return investigator.investigate(user_text, path, route=route, history=history)
 
 
 # Canned responses for the short-circuit categories (no model call, no tools).
@@ -1464,12 +1497,29 @@ def answer_query(client: anthropic.Anthropic, messages: list, user_text: str,
         return _finish({"category": category, "answer": answer,
                         "tools_used": ["get_news"], "refused": False})
 
-    tools_used: list = []
-    tools = [] if category == "education" else TOOLS  # education answers without tools
-    answer = turn(client, messages, tools=tools, tools_used=tools_used,
-                  usage=usage, path=path)
-    return _finish({"category": category, "answer": answer, "tools_used": tools_used,
-                    "refused": False})
+    if category == "education":
+        answer = answer_without_tools(client, messages, usage=usage)
+        return _finish({"category": category, "answer": answer, "tools_used": [],
+                        "refused": False})
+
+    # analytics: the Investigator, not a second tool loop of our own. The route is handed
+    # over rather than re-derived, so the gate is paid for once; `messages[:-1]` is the
+    # conversation before this question, which the goal prompt already carries.
+    state = run_investigator(client, user_text, path, route, usage=usage,
+                             history=messages[:-1])
+    answer = state.summary
+    tools_used = [ev.tool for ev in state.ledger.values()]
+    messages.append({"role": "assistant", "content": answer})
+    # RunOutcome is a str Enum, so these compare without importing it — which matters,
+    # because importing xray_agent at this module's top level is the circular import
+    # run_investigator exists to avoid.
+    result = {"category": category, "answer": answer, "tools_used": tools_used,
+              "refused": state.outcome == "REFUSED"}
+    if state.outcome == "INCOMPLETE_BUDGET":
+        # Surfaced rather than swallowed: a partial answer that looks complete is the one
+        # failure this loop was built to make impossible.
+        result["partial"] = True
+    return _finish(result)
 
 
 def main():

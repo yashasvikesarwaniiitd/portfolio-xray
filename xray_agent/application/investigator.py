@@ -61,7 +61,7 @@ def _key(name: str, args: dict) -> str:
 class Investigator:
     def __init__(self, llm, tools, *, tracer=None, store=None, budget: Budget | None = None,
                  today: date | None = None, max_retries: int = MAX_TOOL_RETRIES,
-                 retry_base_delay: float = RETRY_BASE_DELAY, sleep=time.sleep):
+                 retry_base_delay: float = RETRY_BASE_DELAY, sleep=time.sleep, usage=None):
         self.llm = llm
         self.registry = tools if isinstance(tools, ToolRegistry) else ToolRegistry(tools)
         self.tracer = tracer or NoopTracer()
@@ -71,9 +71,29 @@ class Investigator:
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
         self.sleep = sleep
+        # A logger.Usage the caller already owns, so a chat turn's tokens land in the same
+        # query_log row as its router call instead of being accounted for twice or not at
+        # all. The store, by contrast, defaults to NoopRunStore and the chat path leaves it
+        # there on purpose: investigation_runs keeps the question and summary verbatim, and
+        # writing a deployed chat turn into it would break the "nothing stored" promise.
+        self.usage = usage
 
     # -- public ----------------------------------------------------------------------------
-    def investigate(self, question: str, portfolio_path: str) -> RunState:
+    def investigate(self, question: str, portfolio_path: str,
+                    *, route: dict | None = None, history: list | None = None) -> RunState:
+        """`route` carries a verdict from a gate that has ALREADY run — the chat path
+        classifies before it decides to come here at all, and paying for a second identical
+        classification would be a tax on unification. It is the decision that is reused, not
+        the gate that is skipped: the advice and offtopic branches below are the same code
+        either way, so a caller cannot smuggle an advice question past them by supplying a
+        route. Omit it and the gate runs here, exactly as it did before.
+
+        `history` is prior conversation, prepended before the goal prompt. A CLI
+        investigation has none and passes nothing; chat is multi-turn and "what about just
+        the equities?" means nothing without the turn before it. Only plain text turns are
+        accepted (see _prior_turns) — the tool_use blocks of a previous run would reference
+        IDs this run never issued, which the API rejects outright.
+        """
         state = RunState(goal=Goal(question=question, portfolio_path=portfolio_path),
                          budget=self.budget, run_id=uuid.uuid4().hex[:12])
         self._memo: dict[str, str] = {}
@@ -81,7 +101,7 @@ class Investigator:
         self._step_no = 0
         self.tracer.run_start(state)
         try:
-            self._run(state)
+            self._run(state, route=route, history=history)
         except Exception as e:                      # a crash is an outcome, not a traceback
             state.errors.append(f"loop failed: {e}")
             state.outcome = RunOutcome.FAILED
@@ -93,13 +113,19 @@ class Investigator:
         return state
 
     # -- the loop --------------------------------------------------------------------------
-    def _run(self, state: RunState) -> None:
-        route = self._classify(state, state.goal.question)
+    def _run(self, state: RunState, route: dict | None = None,
+             history: list | None = None) -> None:
+        route = route if route is not None else self._classify(state, state.goal.question)
+        # A supplied route comes from router.classify, whose dict carries no "reason" when
+        # the model omitted one. Own-gate verdicts always do; .get keeps a caller's route
+        # from turning a refusal into a KeyError, which the except in investigate() would
+        # then report as FAILED - a crash where a refusal belonged.
+        reason = route.get("reason", "")
         if route["category"] == "advice":
             state.summary = refusals.refuse(state.goal.question)["message"]
             state.outcome = RunOutcome.REFUSED
-            self.tracer.note(state, f"refused before any tool ran ({route['reason']})")
-            self._record(state, "gate", {"category": "advice", "reason": route["reason"]})
+            self.tracer.note(state, f"refused before any tool ran ({reason})")
+            self._record(state, "gate", {"category": "advice", "reason": reason})
             return
         if route["category"] == "offtopic":
             state.summary = prompts.OFFTOPIC_REDIRECT
@@ -109,7 +135,7 @@ class Investigator:
             return
 
         schemas = self.registry.schemas()
-        messages = [{"role": "user", "content": prompts.goal_prompt(
+        messages = self._prior_turns(history) + [{"role": "user", "content": prompts.goal_prompt(
             state.goal.question, self.today.isoformat(), state.goal.portfolio_path)}]
 
         spent = None
@@ -139,6 +165,43 @@ class Investigator:
 
         state.summary = self._safe_summary(state, messages)
 
+    @staticmethod
+    def _prior_turns(history: list | None) -> list:
+        """Prior conversation, reduced to the turns that are safe to replay.
+
+        Only user/assistant turns whose content is a plain string survive. The frontend
+        sends exactly that shape today, but this is where a caller's data enters the message
+        list, so it is checked rather than trusted: a content-block list from an earlier run
+        would carry tool_use blocks citing tool_use_ids this run never issued, and the API
+        rejects the whole request rather than ignoring them.
+
+        Leading assistant turns are dropped so the list still opens on a user turn, and
+        adjacent same-role turns are merged. Dropping a turn from the middle would
+        otherwise leave two user turns side by side, which the Messages API rejects — so
+        the filter would have turned a cosmetic problem into a failed request.
+        """
+        kept: list = []
+        for turn in history or []:
+            if not isinstance(turn, dict):
+                continue
+            role, content = turn.get("role"), turn.get("content")
+            if role not in ("user", "assistant") or not isinstance(content, str):
+                continue
+            if not content.strip():
+                continue
+            if kept and kept[-1]["role"] == role:
+                kept[-1]["content"] += "\n\n" + content
+            else:
+                kept.append({"role": role, "content": content})
+        while kept and kept[0]["role"] != "user":
+            kept.pop(0)
+        # ...and must end on an assistant turn, because the goal prompt is appended after
+        # it as a user turn. A trailing user turn here is a question nobody answered, which
+        # a well-formed history does not contain.
+        while kept and kept[-1]["role"] != "assistant":
+            kept.pop()
+        return kept
+
     # -- turns -----------------------------------------------------------------------------
     def _generate(self, state: RunState, messages: list, *, tools=None, tool_choice=None,
                   max_tokens: int | None = None):
@@ -164,10 +227,16 @@ class Investigator:
         return resp
 
     def _charge(self, state: RunState, resp) -> float:
+        cache_read = getattr(resp, "cache_read_tokens", 0)
+        cache_write = getattr(resp, "cache_write_tokens", 0)
         c = cost_inr(resp.model, resp.input_tokens, resp.output_tokens,
-                     getattr(resp, "cache_read_tokens", 0),
-                     getattr(resp, "cache_write_tokens", 0))
+                     cache_read, cache_write)
         state.cost_inr += c
+        if self.usage is not None:
+            # Charged here rather than in _generate so the gate's call is counted too: it
+            # is not a step, but it is spend, and the chat path's query_log row should say so.
+            self.usage.add_raw(resp.model, resp.input_tokens, resp.output_tokens,
+                               cache_read, cache_write)
         return c
 
     def _classify(self, state: RunState, question: str) -> dict:
@@ -395,6 +464,8 @@ class Investigator:
         self.store.save_step(state.run_id, self._step_no, kind, payload)
 
 
-def investigate(question: str, portfolio_path: str, *, llm, tools, **kw) -> RunState:
+def investigate(question: str, portfolio_path: str, *, llm, tools,
+                route: dict | None = None, history: list | None = None, **kw) -> RunState:
     """Convenience wrapper for one-shot use."""
-    return Investigator(llm, tools, **kw).investigate(question, portfolio_path)
+    return Investigator(llm, tools, **kw).investigate(
+        question, portfolio_path, route=route, history=history)

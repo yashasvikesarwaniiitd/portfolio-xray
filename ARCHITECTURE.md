@@ -122,7 +122,7 @@ reported separately rather than letting a sale masquerade as lost market value.
 Arrows point inward. `domain/` imports nothing but the standard library and `metrics.py`
 (itself pure, network-free math). `application/` depends on `domain` and `ports`, never on
 an adapter. That is what lets the entire loop be tested with a scripted model and canned
-tools — **232 hermetic tests, no network, no API key**.
+tools — **241 hermetic tests, no network, no API key**.
 
 An honest caveat, since updated by events: `ports/llm.py` was written as a **test seam,
 not provider independence** — `assistant_content` is handed back verbatim, so its shape was
@@ -391,9 +391,11 @@ cannot be talked around.
 
 **Wrapping, not rewriting.** Legacy modules became adapters behind ports; the only edits to
 old code were extracting the two policy functions (re-exported from `report/insights.py`, so
-every existing import still works) and fixing a stale tool description. *Cost:* `agent.py` is
-still 1100 lines with its own duplicated tool loop. Benefit: the deployed app never broke, and
-the hermetic suite went 59 → 96 passing with no regressions.
+every existing import still works) and fixing a stale tool description. *Cost:* `agent.py`
+kept its own duplicated tool loop for a release. Benefit: the deployed app never broke, and
+the hermetic suite went 59 → 96 passing with no regressions. That loop has since been
+deleted and the chat's analytics branch moved onto this one; what survives it is the tool
+table, `agent.TOOLS`, which nothing in production reads any more.
 
 ---
 
@@ -436,9 +438,10 @@ on the final summary regardless of where the text came from, so the injection fa
 mechanically rather than by the model's good judgement. There is a test for exactly this.
 
 **What is the weakest part?**
-`agent.py` still contains the original tool loop, so there are now two loops in the repo.
-The chat path uses the old one and only `/investigate`-style entry points use the new one.
-Unifying them is the obvious next refactor and I ran out of night.
+`agent.py` is still 1,500 lines, and `TOOLS` and `run_tool` are now dead weight inside
+it — the old loop that used them is gone, but its tool table still sits beside the one
+in `adapters/legacy_tools.py`, so the duplication outlived the duplicate loop.
+Deleting them is the next cut.
 
 **What would break first at 1000 users?**
 The shared `PortfolioContext` is per-run and in-memory, which is fine, but yfinance is not a
@@ -456,7 +459,8 @@ unit tests and skipped the live trace.
 
 ## 11. What I would do next
 
-1. **Unify the two loops.** Move the chat path onto the Investigator and delete `agent.turn`.
+1. **Finish the unification.** `agent.turn` is gone and chat's analytics branch runs on
+   this loop; `agent.TOOLS` and `agent.run_tool` are the leftovers to delete.
 2. **L2 — the scheduled watcher.** The weekly digest becomes a cron-triggered run that decides
    what is *worth* reporting rather than dumping everything, and stays quiet when nothing moved.
 3. **Self-filing failures.** `CLAUDE.md` promises every production failure becomes a golden

@@ -76,9 +76,16 @@ Being precise about this, because the distinction is the interesting part.
 classifier gates every query into analytics / news / education / advice / offtopic, advice
 short-circuits into canned refusals *before any tool runs*, and every number the user sees
 is computed by pure Python the model merely orchestrates. The refusal path fails safe - a
-router error is treated as advice, never as analytics. For "what's the NAV of Parag
-Parikh?" a deterministic pipeline is simply better than an agent: cheaper, faster, and
-easier to prove correct.
+router error is treated as advice, never as analytics.
+
+**The router stayed; the second tool loop did not.** Advice, offtopic, education and news
+still short-circuit exactly as they did - a bounded agent loop is the wrong shape for
+"what is XIRR?", and its verifier would reject an answer that cites no evidence because
+there is none to cite. What changed is the analytics branch: it used to run `agent.turn`,
+a second tool loop with no budget, no evidence ledger and no verifier, and it now runs the
+Investigator like everything else. So "what's the NAV of Parag Parikh?" is still gated by a
+deterministic router, and the tool call it makes is now bounded and verified rather than
+merely trusted.
 
 **The Investigator (v1.2) is an agent, because one question needs one.** "Why is my
 portfolio down this month?" has no fixed answer shape. If one holding caused 80% of the
@@ -104,9 +111,9 @@ uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py \
   test_xray_agent_evalrouting.py test_xray_agent_broker.py -m "not regression" -q
 ```
 
-**232 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
+**241 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
 verification, prompt injection, provider translation) is tested as deterministic logic.
-231 pass and one skips unless the optional `tracing` extra is installed
+240 pass and one skips unless the optional `tracing` extra is installed
 (`uv sync --extra tracing`).
 
 Then, with `ANTHROPIC_API_KEY` or `GROQ_API_KEY` in `.env`:
@@ -184,7 +191,7 @@ question ─► ROUTER GATE ──advice──► canned refusal      (REFUSED, 
 ```
 
 Clean-architecture layering (`domain` / `application` / `ports` / `adapters`) is what lets
-the whole loop run against a scripted model and canned tools: **232 hermetic tests, no
+the whole loop run against a scripted model and canned tools: **241 hermetic tests, no
 network, no API key.**
 
 SQLite logs every query's tokens, cost and latency, and every investigation's outcome,
@@ -246,7 +253,7 @@ manual targets: `make evals-full` (assistant), `make evals-agent` (~₹1.2, all 
 | Operation | Avg cost | Latency |
 |---|---|---|
 | Investigation (the agent: plan → tools → verify → report) | **₹0.11–0.25** | 10–20s |
-| Chat turn (analytics, tools + synthesis) | **₹0.145** | ~12s |
+| Chat turn (analytics, now via the Investigator) | ₹0.145 → ₹0.22 ◆ | ~13s |
 | Cited news answer (fetch → judge → synth) | **₹0.110** | ~8s |
 | Full AI health report (~10 guarded insight calls) | ₹0.27 ◇ | ~1–2 min |
 
@@ -256,6 +263,14 @@ against the deployed instance and read back from its own SQLite log
 until it was finally re-measured, a 17× fall that sits alongside the 27× on the eval
 cases. Measured, not scaled: the guess would have been close and still a guess. The
 portfolio behind it is the poisoned-name test fixture, so a larger book may cost more._
+
+◆ _₹0.145 was the many-run average of the old `agent.turn` loop, which no longer exists.
+The first analytics turn through the Investigator cost **₹0.2223** (27,487 input tokens,
+1,735 output, 12.9s) — about 1.5× more, for the reason §9 of ARCHITECTURE gives: every tool
+result stays in the history and is re-sent, and the loop also carries a larger system prompt
+and 17 tool schemas. That is the price of the budget, the evidence ledger and the verifier
+on a path that previously had none of them. One sample against the old figure's many, so
+both are shown rather than the new one quietly replacing the old._
 
 Everything runs on **Haiku 5.5** ($0.10/$0.50 per MTok). The deployed demo rate-limits to
 20 chat turns and 3 reports per IP per day, with a dashboard kill switch.
@@ -321,16 +336,20 @@ built.
 - Free-tier cold start (~30s) — mitigated by a keep-warm ping and honest UI copy.
 - Judge-scored metrics (groundedness/clarity) vary run to run; the refusal and honesty
   metrics are exact-match and don't.
-- **There are two tool loops in the repo.** `agent.py` still has the original one and
-  the chat path uses it; the Investigator is a separate, newer loop. Unifying them is
-  the next refactor (ARCHITECTURE.md §11), not something I've done.
+- **The chat's analytics branch runs on the Investigator**, so there is one tool loop
+  in the repo rather than two. The router still short-circuits advice, offtopic,
+  education and news into the cheap deterministic paths they already had — a loop is
+  the wrong shape for "what is XIRR?", and the verifier would reject an answer with
+  no evidence behind it. `agent.TOOLS` and `agent.run_tool` are now unreachable from
+  production and still to be removed.
 - The Investigator is **L1 on the autonomy ladder** — it investigates when asked. It is
   not scheduled, not multi-agent, and has no memory between runs.
 
 ## What I'd build next
 
-1. **Unify the two loops** — move the chat path onto the Investigator and delete
-   `agent.turn`.
+1. **Delete `agent.TOOLS` and `agent.run_tool`** — the old loop is gone and they are
+   what is left of its plumbing, still duplicating tool definitions that now live in
+   `xray_agent/adapters/legacy_tools.py`.
 2. **L2, the scheduled watcher** — the weekly digest becomes a cron-triggered run that
    decides what is *worth* reporting and stays quiet when nothing moved.
 3. **Self-filing failures** — a rejected finding should append itself to the golden

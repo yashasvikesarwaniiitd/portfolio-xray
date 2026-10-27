@@ -344,13 +344,21 @@ def test_the_chat_agent_can_answer_do_i_own_the_same_thing_twice():
 
 def test_every_portfolio_tool_accepts_the_portfolio_it_is_asked_about():
     """The chat used to answer about the server default no matter what the user had
-    loaded, so the dashboard and the conversation beside it described different books."""
+    loaded, so the dashboard and the conversation beside it described different books.
+
+    `agent.turn` used to be in this list and is gone: the analytics branch now runs on the
+    Investigator. The guard follows it there — run_investigator takes the path, and
+    LegacyTools takes it in its constructor, so the same mistake cannot come back by a
+    different door."""
     import inspect
     import agent
-    for fn in (agent.run_tool, agent.turn, agent.answer_query, agent.answer_news,
+    from xray_agent.adapters.legacy_tools import LegacyTools
+    for fn in (agent.run_tool, agent.run_investigator, agent.answer_query, agent.answer_news,
                agent.fetch_snapshot, agent.fetch_concentration, agent.fetch_fund_overlap,
                agent.fetch_sharpe, agent.fetch_portfolio_xirr, agent.fetch_digest):
         assert "path" in inspect.signature(fn).parameters, fn.__name__
+    assert "portfolio_path" in inspect.signature(LegacyTools.__init__).parameters
+    assert not hasattr(agent, "turn"), "the old chat tool loop is supposed to be gone"
 
 
 def test_run_tool_dispatches_to_the_portfolio_it_is_given(tmp_path):
@@ -388,3 +396,94 @@ def test_a_broken_classifier_says_so_instead_of_impersonating_a_refusal():
     assert out["refused"] is True
     assert "service problem" in out["answer"]
     assert "SEBI" not in out["answer"]    # must not claim a compliance rationale
+
+
+# --- the chat is wired to the Investigator -------------------------------------------------
+# There used to be two tool loops: agent.turn for chat, the Investigator for "why did my
+# portfolio move". These assert the analytics branch now runs on the second one, and that
+# the cheap branches the router short-circuits were left alone.
+
+def _evidence(tool):
+    import types
+    return types.SimpleNamespace(tool=tool)
+
+
+def test_the_chat_analytics_branch_runs_on_the_investigator(monkeypatch):
+    """The point of the refactor: one tool loop in the repo, and chat uses it."""
+    import types
+
+    import agent
+    import router
+    seen = {}
+
+    def fake_classify(client, query, **kw):
+        return {"category": "analytics", "reason": "asks for a computed metric"}
+
+    def fake_run(client, user_text, path, route, usage=None, history=None):
+        seen.update(route=route, history=list(history or []), question=user_text, path=path)
+        return types.SimpleNamespace(summary="Your HHI is 0.21.", outcome="COMPLETED",
+                                     ledger={"E1": _evidence("concentration")})
+
+    monkeypatch.setattr(router, "classify", fake_classify)
+    monkeypatch.setattr(agent, "run_investigator", fake_run)
+
+    messages = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+    out = agent.answer_query(object(), messages, "how concentrated am I?", {}, log=False)
+
+    assert out["answer"] == "Your HHI is 0.21."
+    assert out["tools_used"] == ["concentration"]
+    assert out["refused"] is False
+    assert "partial" not in out
+    # the gate ran once, upstream, and its verdict was handed over rather than re-derived
+    assert seen["route"]["category"] == "analytics"
+    # history is the conversation BEFORE this question; the goal prompt carries the question
+    assert seen["history"] == [{"role": "user", "content": "hi"},
+                               {"role": "assistant", "content": "hello"}]
+    assert seen["question"] == "how concentrated am I?"
+
+
+def test_a_chat_turn_that_runs_out_of_budget_says_so(monkeypatch):
+    """A partial answer that looks complete is the one failure this loop exists to prevent,
+    so INCOMPLETE_BUDGET has to survive the trip back through the chat's result shape."""
+    import types
+
+    import agent
+    import router
+    monkeypatch.setattr(router, "classify",
+                        lambda client, query, **kw: {"category": "analytics", "reason": ""})
+    monkeypatch.setattr(agent, "run_investigator",
+                        lambda *a, **kw: types.SimpleNamespace(
+                            summary="What I could establish: ...",
+                            outcome="INCOMPLETE_BUDGET", ledger={}))
+    out = agent.answer_query(object(), [], "why am I down?", {}, log=False)
+    assert out["partial"] is True
+    assert out["refused"] is False
+
+
+def test_education_still_answers_in_one_call_with_no_tools(monkeypatch):
+    """Education never needed a loop: with an empty tool list the old `turn` could not get a
+    tool_use stop reason, so it returned after one call. It keeps that shape, which is why
+    deleting the loop did not cost this branch anything."""
+    import types
+
+    import agent
+    import router
+    sent = []
+
+    class FakeClient:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                sent.append(kw)
+                return types.SimpleNamespace(
+                    stop_reason="end_turn", usage=None,
+                    content=[types.SimpleNamespace(type="text", text="XIRR is a rate.")])
+
+    monkeypatch.setattr(router, "classify",
+                        lambda client, query, **kw: {"category": "education", "reason": ""})
+    out = agent.answer_query(FakeClient(), [], "what is XIRR?", {}, log=False)
+
+    assert out["answer"] == "XIRR is a rate."
+    assert out["tools_used"] == []
+    assert len(sent) == 1, "education should cost exactly one model call"
+    assert "tools" not in sent[0], "education must not be offered tools"

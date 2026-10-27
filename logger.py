@@ -74,6 +74,15 @@ class Usage:
             int(getattr(u, "cache_creation_input_tokens", 0) or 0),
         ))
 
+    def add_raw(self, model: str, input_tokens: int, output_tokens: int,
+                cache_read: int = 0, cache_write: int = 0) -> None:
+        """Record one call from counts already extracted. The Investigator's LLM port hands
+        back plain ints rather than an SDK response, and without this the chat turns that
+        now run through that loop would log zero tokens and zero cost - leaving the
+        economics table in the README quietly measuring nothing."""
+        self.calls.append((model, int(input_tokens or 0), int(output_tokens or 0),
+                           int(cache_read or 0), int(cache_write or 0)))
+
     def totals(self) -> tuple[int, int]:
         """(input, output). Input INCLUDES cache reads and writes, so the logged token
         count still reflects everything that was actually sent."""

@@ -548,3 +548,89 @@ def test_a_clean_summary_is_untouched():
     ], tools)
     state = agent_.investigate("Why am I down?", "portfolio.sample.csv")
     assert state.summary == "Market movement of -18200.0, not withdrawals."
+
+
+# --- the chat path on this loop ------------------------------------------------------------
+# agent.turn is gone; the chat's analytics branch runs here now. These cover what that
+# migration added: a gate verdict handed in from upstream, prior conversation, and a usage
+# sink so the chat turn's tokens still reach query_log.
+
+def test_a_supplied_route_is_reused_instead_of_paying_for_a_second_gate():
+    """The chat classifies before it decides to come here. Classifying again would charge
+    the user twice for the same decision and add a round trip to every analytics turn."""
+    llm = ScriptedLLM([calls(("finish", {"summary": "Nothing moved in the window."}))],
+                      model=PRICED_MODEL)
+    state = Investigator(llm, FakeTools({})).investigate(
+        "why is my portfolio flat?", "p.csv", route={"category": "analytics"})
+    assert state.outcome == RunOutcome.COMPLETED
+    assert len(llm.calls) == 1, "a second gate call was made"
+    assert all(c["tool_choice"] != {"type": "tool", "name": "classify"} for c in llm.calls)
+
+
+def test_a_supplied_advice_route_still_refuses_before_any_model_call():
+    """The decision is reused, the gate is not skipped. A caller cannot hand in a route to
+    get an advice question past the refusal - it meets the same branch either way. The
+    empty script is the assertion: ScriptedLLM raises if the loop asks for a turn."""
+    tools = FakeTools({})
+    state = Investigator(ScriptedLLM([]), tools).investigate(
+        "should I sell my HDFC?", "p.csv",
+        route={"category": "advice", "reason": "asks for a recommendation"})
+    assert state.outcome == RunOutcome.REFUSED
+    assert tools.calls == []
+
+
+def test_a_route_with_no_reason_refuses_rather_than_failing():
+    """router.classify omits `reason` when the model does. Reading it with [] turned a
+    refusal into a KeyError, which investigate() then reported as outcome FAILED - a crash
+    wearing the clothes of a system fault, where a refusal belonged."""
+    state = Investigator(ScriptedLLM([]), FakeTools({})).investigate(
+        "what should I buy?", "p.csv", route={"category": "advice"})
+    assert state.outcome == RunOutcome.REFUSED
+    assert "advice" not in state.summary.lower() or state.summary
+
+
+def test_prior_conversation_is_replayed_as_alternating_text_turns():
+    """Chat is multi-turn; "what about just the equities?" means nothing on its own. Only
+    plain text survives: a tool_use block from an earlier turn cites a tool_use_id this run
+    never issued, and the API rejects the whole request over it."""
+    llm = ScriptedLLM([calls(("finish", {"summary": "Covered."}))], model=PRICED_MODEL)
+    history = [
+        {"role": "assistant", "content": "leading assistant turn, nothing precedes it"},
+        {"role": "user", "content": "how concentrated am I?"},
+        {"role": "assistant",
+         "content": [{"type": "tool_use", "id": "tu_old", "name": "x", "input": {}}]},
+        {"role": "assistant", "content": "Your HHI is high."},
+        {"role": "user", "content": "a trailing question nobody answered"},
+    ]
+    Investigator(llm, FakeTools({})).investigate(
+        "and the funds?", "p.csv", route={"category": "analytics"}, history=history)
+
+    sent = llm.calls[0]["messages"]
+    assert [m["role"] for m in sent] == ["user", "assistant", "user"], "roles must alternate"
+    assert sent[0]["content"] == "how concentrated am I?"
+    assert sent[1]["content"] == "Your HHI is high."
+    assert "and the funds?" in sent[2]["content"], "the goal prompt comes last"
+    assert not any(isinstance(m["content"], list) for m in sent)
+
+
+def test_a_cli_run_sends_no_history_at_all():
+    """The default has to stay exactly what it was, or every recorded eval moves."""
+    llm = ScriptedLLM([classifies("analytics"),
+                       calls(("finish", {"summary": "Covered."}))], model=PRICED_MODEL)
+    Investigator(llm, FakeTools({})).investigate("why?", "p.csv")
+    assert len(llm.calls[1]["messages"]) == 1
+
+
+def test_the_chat_turns_tokens_reach_the_usage_sink_including_the_gates():
+    """Without this the chat rows in query_log would log zero tokens and zero cost, and the
+    economics table in the README would quietly be measuring nothing. The gate is not a
+    step, but it is spend, so it is counted too."""
+    import logger
+    usage = logger.Usage()
+    llm = ScriptedLLM([classifies("analytics"),
+                       calls(("finish", {"summary": "Covered."}))], model=PRICED_MODEL)
+    Investigator(llm, FakeTools({}), usage=usage).investigate("why?", "p.csv")
+    assert len(usage.calls) == 2, "the gate call was not charged to the chat turn"
+    inp, out = usage.totals()
+    assert inp > 0 and out > 0
+    assert usage.cost_usd() > 0
