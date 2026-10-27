@@ -315,7 +315,7 @@ def resolve_holdings(holdings: list, search_fn=None, master_fn=None, nav_fn=None
         return _resolve_by_name(holdings, search_fn)
     import agent
     master_fn = master_fn or agent.scheme_master
-    nav_fn = nav_fn or agent.nav_history
+    injected_nav_fn = nav_fn
     detail_fn = detail_fn or agent.scheme_full_name
     todo = [h for h in holdings if not h.get("source") and h.get("name")]
     if not todo:
@@ -325,14 +325,29 @@ def resolve_holdings(holdings: list, search_fn=None, master_fn=None, nav_fn=None
     except Exception as e:
         return [f"{h['name']}: AMFI lookup failed ({e})" for h in todo]
 
-    # One fund can be held in several holding rows, and every candidate's NAV history is a
-    # network call, so warm the histories in parallel before any verification reads them.
-    pools = {h["name"].strip().lower(): candidate_pool(h["name"], master) for h in todo}
-    codes = sorted({c for pool in pools.values() for c, _ in pool})
-    if len(codes) > 1:
+    def nav_fn_for(h):
+        """How to fetch a candidate's NAVs for THIS holding: only the window its purchases
+        span. (See agent.nav_window for why a full history per candidate was the cost.) An
+        injected function, as tests pass, is used as given."""
+        if injected_nav_fn is not None:
+            return injected_nav_fn
+        from datetime import timedelta
+        dates = [t.date for t in (h.get("transactions") or [])]
+        lo, hi = min(dates) - timedelta(days=5), max(dates) + timedelta(days=5)
+        return lambda code: agent.nav_window(code, lo, hi)
+
+    todo = [h for h in todo if h.get("transactions") or injected_nav_fn is not None]
+    # One fund can be held in several holding rows, and every candidate's NAVs are a network
+    # call, so warm them in parallel before any verification reads them.
+    by_name: dict = {}
+    for h in todo:
+        by_name.setdefault(h["name"].strip().lower(), h)
+    jobs = [(nav_fn_for(h), code)
+            for h in by_name.values() for code, _ in candidate_pool(h["name"], master)]
+    if len(jobs) > 1:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=6) as ex:
-            list(ex.map(lambda c: _safe(nav_fn, c), codes))
+            list(ex.map(lambda j: _safe(j[0], j[1]), jobs))
 
     notes: list = []
     cache: dict = {}
@@ -340,7 +355,7 @@ def resolve_holdings(holdings: list, search_fn=None, master_fn=None, nav_fn=None
         key = h["name"].strip().lower()
         if key not in cache:
             cache[key] = _verify_one(h["name"], h.get("transactions") or [], master,
-                                     nav_fn, detail_fn)
+                                     nav_fn_for(h), detail_fn)
         r = cache[key]
         if r.get("error"):
             notes.append(f"{h['name']}: {r['error']}")

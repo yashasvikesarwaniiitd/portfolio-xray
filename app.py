@@ -15,6 +15,7 @@ import io
 import json
 import os
 import re
+import threading
 import time
 import uuid
 
@@ -66,7 +67,10 @@ def call_json(method: str, path: str, cold_slot=None, **kw):
     try:
         return code, json.loads(content)
     except Exception:
-        return code, {"error": content.decode(errors="replace")[:300]}
+        # Not JSON: either a plain-text error, or - when the host's proxy gives up on a slow
+        # request - a whole HTML error page. Never show the latter to a person.
+        friendly = describe_http_failure(code, content)
+        return code, {"error": friendly or content.decode(errors="replace")[:300]}
 
 
 # ---------------------------------------------------------------- saved portfolios
@@ -207,7 +211,7 @@ def saved_delete(pid: str) -> None:
 # ---------------------------------------------------------------- formatting helpers
 
 # Formatting lives in uiformat.py — pure and unit-tested (no Streamlit import).
-from uiformat import inr, md_to_html, pct  # noqa: E402
+from uiformat import describe_http_failure, inr, md_to_html, pct  # noqa: E402
 
 
 # ---------------------------------------------------------------- design system (CSS)
@@ -750,6 +754,7 @@ ss.setdefault("active", None)
 ss.setdefault("rail_upload_sig", None)   # the last file the rail uploader tried
 ss.setdefault("saved_cache", None)       # (enabled, rows); None = refetch
 ss.setdefault("storage_off", False)      # the server said saving is not switched on
+ss.setdefault("warmed", False)           # have we already asked the backend to warm up
 ss.setdefault("restored", False)         # have we already tried to reopen a saved portfolio
 ss.setdefault("flash", None)             # (kind, text) to show once after the next rerun
 ss.setdefault("save_note", None)         # why the last auto-save did not happen, if it didn't
@@ -1038,6 +1043,23 @@ def upload_dialog() -> None:
             persist(ss.active)
             ss.flash = ("success", f"“{ss.active}” added.")
             st.rerun()
+
+
+# ---------------------------------------------------------------- warm the backend
+
+if not ss.warmed:
+    # Fire and forget, once per session. The backend sleeps when idle and its first analysis
+    # does expensive one-time work, so a page opening is the earliest moment to start both:
+    # by the time a file is chosen the instance is awake and part-warm. A daemon thread with a
+    # short timeout so a dead backend can never delay or break the page.
+    ss.warmed = True
+    def _warm():
+        try:
+            requests.get(f"{BACKEND}/warm", timeout=5)
+        except Exception:
+            pass
+
+    threading.Thread(target=_warm, daemon=True).start()
 
 
 # ---------------------------------------------------------------- restore on refresh

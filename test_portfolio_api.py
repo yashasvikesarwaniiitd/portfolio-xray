@@ -52,11 +52,19 @@ def test_merge_refuses_an_empty_upload():
 
 
 def test_the_merged_result_is_accepted_by_the_analysis_validator():
-    """A merge must never hand back something the engine then cannot read."""
+    """A merge must never hand back something the engine then cannot read.
+
+    This used to POST the merged text to /portfolios. With a database configured - which a
+    developer's .env does - that SAVED a row on every test run, under a fixed owner key, in the
+    real database, until the per-key cap was reached and the test began failing. It calls the
+    validator directly instead: that is the thing being asserted, and it touches no storage.
+    """
     merged = client.post("/merge", json={"existing_csv": A, "incoming_csv": B}).json()
-    r = client.post("/portfolios", json={"name": "x", "csv_text": merged["csv_text"]},
-                    headers={"X-Owner-Key": "k"})
-    assert r.status_code in (200, 503)      # 503 only because saving is off in CI
+    path = api._csv_to_temp(merged["csv_text"])      # raises ValueError if unreadable
+    try:
+        assert path
+    finally:
+        api._quiet_unlink(path)
 
 
 def test_update_reports_saving_off_rather_than_pretending(monkeypatch):

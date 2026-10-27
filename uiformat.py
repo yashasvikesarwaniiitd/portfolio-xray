@@ -102,3 +102,29 @@ def md_to_html(text: str) -> str:
     close_list()
     flush_para()
     return "".join(out)
+
+
+SLOW_SERVER_NOTE = (
+    "The server took too long to answer. After it has been idle, the first analysis can take "
+    "a couple of minutes while it warms up - and it keeps working in the background, so "
+    "waiting a minute and trying again is usually much faster.")
+
+_PROXY_STATUSES = {502, 503, 504, 520, 521, 522, 523, 524}
+
+
+def describe_http_failure(code: int, body: bytes | str) -> str | None:
+    """A readable message for a reply that is not the JSON the app expects, else None.
+
+    The host's proxy answers with ITS OWN HTML error page when the backend takes too long or
+    is restarting. That was shown to the user verbatim - a screenful of `<!DOCTYPE html>` and
+    IE6 conditional comments in a red box - because anything that failed to parse as JSON was
+    displayed as the error text. A 5xx proxy status, or a body that is plainly a web page,
+    is the server being slow or unavailable, which the person can act on; the markup is not.
+    """
+    text = body.decode("utf-8", "replace") if isinstance(body, (bytes, bytearray)) else str(body)
+    head = text.lstrip()[:200].lower()
+    looks_like_page = head.startswith(("<!doctype", "<html", "<head", "<body")) or "<html" in head
+    if looks_like_page or code in _PROXY_STATUSES:
+        return SLOW_SERVER_NOTE
+    return None
+

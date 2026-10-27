@@ -31,7 +31,12 @@ reconstructed, and it can express SELLS, which the SIP sheet cannot.
 - MF scheme names resolve to AMFI codes by splitting core/plan/option; contradicting the
   stated plan is penalised, never defaulted to Direct Growth. A name match is only a
   CANDIDATE: it is accepted only if the scheme's NAVs match the NAVs the statement itself
-  recorded on its purchase dates (`fund_resolver.nav_match`). A fund that cannot be verified
+  recorded on its purchase dates (`fund_resolver.nav_match`). NAVs are fetched for the
+  window of that holding's purchases only (`agent.nav_window`), never a candidate's full
+  history: downloading 38 full histories made a first analysis take ~115s on the free
+  tier, past the host proxy's ~100s limit, so the user got the proxy's HTML error page.
+  The frontend warms the backend on page open (`/warm`) and never shows a non-JSON reply
+  as an error message (`uiformat.describe_http_failure`). A fund that cannot be verified
   is left unpriced, never priced on a guess. A name-only match once priced a fund on a
   different (index) fund whose NAV was ~30x smaller and fabricated a ~96% loss on it.
   Candidates come from contiguous containment on the compacted name, so "Small Cap" and

@@ -425,19 +425,7 @@ def _price_map(source: str, symbol: str, start: date, end: date) -> dict:
         # its units are not share counts and its currency move is invisible.
         return _to_inr(prices, start, end) if is_usd_denominated(source, symbol) else prices
     if source == "mftool":
-        raw = _mf().get_scheme_historical_nav(str(symbol))
-        if not raw or not raw.get("data"):
-            return {}
-        out = {}
-        for d in raw["data"]:
-            try:
-                dt = datetime.strptime(d["date"], "%d-%m-%Y").date()
-                nav = float(d["nav"])
-                if start <= dt <= end and nav == nav:  # nav == nav filters NaN
-                    out[dt] = nav
-            except (ValueError, KeyError, TypeError):
-                continue
-        return out
+        return nav_window(str(symbol), start, end)
     return {}
 
 
@@ -1185,12 +1173,21 @@ def search_fund(query: str, limit: int = 10) -> str:
                        "note": note})
 
 
+_MASTER_LOCK = __import__("threading").Lock()
+
+
 def scheme_master() -> dict:
-    """{AMFI code: scheme name} for every scheme, fetched once per process."""
+    """{AMFI code: scheme name} for every scheme, fetched once per process.
+
+    Locked because the server now starts this in the background when a page opens (see
+    /warm): without it, the warm-up and the first real request would both download and parse
+    the ~14,000-line list at once, doing the most expensive step twice.
+    """
     global _SCHEME_CODES
-    if _SCHEME_CODES is None:
-        _SCHEME_CODES = _mf().get_scheme_codes() or {}
-    return _SCHEME_CODES
+    with _MASTER_LOCK:
+        if _SCHEME_CODES is None:
+            _SCHEME_CODES = _mf().get_scheme_codes() or {}
+        return _SCHEME_CODES
 
 
 _NAV_HISTORY: dict = {}
@@ -1215,6 +1212,56 @@ def nav_history(code) -> dict:
             continue
     if out:
         _NAV_HISTORY[code] = out
+    return out
+
+
+_NAV_WINDOW: dict = {}
+MFAPI = "https://api.mfapi.in/mf"
+
+
+def nav_window(code, start: date, end: date) -> dict:
+    """{date: NAV} for one scheme over [start, end] only.
+
+    The full history of an old fund is ~5,000 rows (213 KB of JSON). Verifying a fund against
+    its statement needs the NAVs around the purchase dates, and pricing it needs the window
+    from the first purchase, so downloading and parsing the whole history of every candidate -
+    38 of them for ten funds - was the whole cost of a first analysis. On Render's free tier,
+    where JSON parsing is CPU-bound and the CPU is a fraction of a core, that took ~115s: past
+    the proxy's ~100s limit, so the user got the proxy's HTML error page instead of an answer.
+    The NAV API takes a date range and returns ~20 rows for a month (measured), so ask for
+    only the window.
+
+    Falls back to the full history if the ranged request fails, so a change in that API
+    degrades to the old (slow) behaviour rather than to no price at all. A failed or empty
+    result is not cached.
+    """
+    import requests
+    code = str(code)
+    key = (code, start, end)
+    if key in _NAV_WINDOW:
+        return _NAV_WINDOW[key]
+    out: dict = {}
+    try:
+        r = requests.get(f"{MFAPI}/{code}", timeout=20,
+                         params={"startDate": start.isoformat(), "endDate": end.isoformat()})
+        r.raise_for_status()
+        for d in (r.json().get("data") or []):
+            try:
+                dt = datetime.strptime(d["date"], "%d-%m-%Y").date()
+                nav = float(d["nav"])
+                if start <= dt <= end and nav == nav:
+                    out[dt] = nav
+            except (ValueError, KeyError, TypeError):
+                continue
+    except Exception:
+        out = {}
+    if not out:
+        try:
+            out = {d: v for d, v in nav_history(code).items() if start <= d <= end}
+        except Exception:
+            out = {}
+    if out:
+        _NAV_WINDOW[key] = out
     return out
 
 

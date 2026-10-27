@@ -412,6 +412,34 @@ def portfolios_list(request: Request):
     return {"enabled": True, "portfolios": storage.list_for(_owner(request))}
 
 
+_warming = False
+
+
+@app.get("/warm")
+def warm():
+    """Start the slow one-time work in the background and return at once.
+
+    The first analysis after the server has been idle pays for downloading and parsing the
+    ~14,000-scheme fund list, and on the free tier that CPU-bound step is slow. The frontend
+    calls this when a page opens - which also wakes a sleeping instance - so by the time
+    someone has chosen a file, part of that work is done and the first request is shorter.
+    Idempotent: later calls start nothing, and failure is silent because it is only a
+    head start.
+    """
+    global _warming
+    if not _warming:
+        _warming = True
+        import threading
+
+        def _load():
+            try:
+                agent.scheme_master()
+            except Exception:
+                pass
+        threading.Thread(target=_load, daemon=True).start()
+    return {"warming": True}
+
+
 @app.get("/storage/status")
 def storage_status():
     """Whether saving can actually work, and a coarse reason if not. `enabled` on /portfolios
