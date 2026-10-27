@@ -255,15 +255,26 @@ header[data-testid="stHeader"] { background: transparent; }
 [data-testid="stSidebar"] .stButton > button[kind="primary"] [data-testid="stIconMaterial"] {
   color: var(--lime);
 }
-[data-testid="stSidebar"] [class*="st-key-rail_sample"] .stButton > button {
+/* Upload is the primary way in, so it carries the lime; the sample is the quieter second
+   option beneath it, centred. */
+[data-testid="stSidebar"] [class*="st-key-rail_upload_btn"] .stButton > button {
   justify-content: center; background: var(--lime); color: var(--lime-ink);
   box-shadow: none; font-weight: 600; min-height: 42px;
 }
-[data-testid="stSidebar"] [class*="st-key-rail_sample"] .stButton > button div {
+[data-testid="stSidebar"] [class*="st-key-rail_upload_btn"] .stButton > button div {
   justify-content: center;
 }
-[data-testid="stSidebar"] [class*="st-key-rail_sample"] .stButton > button:hover {
+/* Streamlit colours a button's icon with the theme accent, which is this same lime, so on the
+   lime button the icon was lime on lime and simply not there. */
+[data-testid="stSidebar"] [class*="st-key-rail_upload_btn"] .stButton > button [data-testid="stIconMaterial"] {
+  color: var(--lime-ink);
+}
+[data-testid="stSidebar"] [class*="st-key-rail_upload_btn"] .stButton > button:hover {
   background: #E2FF7A;
+}
+[data-testid="stSidebar"] [class*="st-key-rail_sample"] .stButton > button,
+[data-testid="stSidebar"] [class*="st-key-rail_sample"] .stButton > button div {
+  justify-content: center;
 }
 .rail-brand { display: flex; align-items: center; gap: 10px; color: var(--ink1); }
 .rail-brand .wm { display: flex; align-items: baseline; gap: 5px; }
@@ -1103,19 +1114,18 @@ with st.sidebar:
     st.markdown('<div class="rail-hr"></div>', unsafe_allow_html=True)
     st.markdown('<div class="rail-label">Add a portfolio</div>', unsafe_allow_html=True)
 
-    if "Sample" not in ss.portfolios:
-        if st.button("Load the sample", key="rail_sample", use_container_width=True,
-                     type="primary" if not ss.portfolios else "secondary"):
-            if load_analysis(None, "Sample portfolio", name="Sample"):
-                st.rerun()
-
     # Upload opens a dialog rather than showing a bare dropzone, because "add this file"
     # is two different intentions: extend the portfolio you are looking at, or start a new
     # one. A dropzone cannot ask which, and guessing wrong either duplicates a portfolio or
     # overwrites one.
     if st.button("Upload", key="rail_upload_btn", use_container_width=True,
-                 icon=":material/upload:"):
+                 icon=":material/upload:", type="primary"):
         upload_dialog()
+
+    if "Sample" not in ss.portfolios:
+        if st.button("Load the sample", key="rail_sample", use_container_width=True):
+            if load_analysis(None, "Sample portfolio", name="Sample"):
+                st.rerun()
     st.markdown('<div class="rail-cap">A Groww equity or mutual-fund transaction report, '
                 'or the SIP sheet — CSV or Excel.</div>', unsafe_allow_html=True)
 
