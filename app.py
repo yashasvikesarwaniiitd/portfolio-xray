@@ -553,8 +553,6 @@ div[data-testid="stExpander"] details { border: 1px solid var(--line2); border-r
 [data-testid="stFileUploaderDropzone"] { background: var(--bg0); border: 1px dashed var(--line2);
   border-radius: 10px; }
 [data-testid="stCaptionContainer"] { color: var(--ink3); }
-.foot { border-top: 1px solid var(--line); margin-top: 40px; padding-top: 16px;
-  font-size: 12px; color: var(--ink3); line-height: 1.6; }
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -1792,14 +1790,3 @@ if ss.flash:
     {"success": st.success, "warning": st.warning}.get(_kind, st.info)(_text)
 
 {"ask": page_ask, "analysis": page_analysis, "report": page_report}.get(ss.page, page_ask)()
-
-code, stats = call_json("GET", "/stats")
-if code == 200 and stats.get("queries"):
-    st.markdown(
-        f'<div class="foot">Live economics from this server\'s own log: '
-        f'<span class="mono ink">{stats["queries"]}</span> queries served · avg '
-        f'<span class="mono ink">₹{stats["avg_cost_inr"]:.2f}</span> per query · '
-        f'<span class="mono ink">{stats.get("reports_generated", 0)}</span> AI reports at '
-        f'avg <span class="mono ink">₹{stats.get("avg_report_cost_inr", "—")}</span>. '
-        f'Free-demo limits: 20 chat turns and 3 reports per day.</div>',
-        unsafe_allow_html=True)
