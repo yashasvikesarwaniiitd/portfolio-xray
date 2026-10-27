@@ -114,7 +114,7 @@ uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py \
   -m "not regression" -q
 ```
 
-**267 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
+**306 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
 verification, prompt injection, provider translation) is tested as deterministic logic.
 266 pass and one skips unless the optional `tracing` extra is installed
 (`uv sync --extra tracing`).
@@ -190,7 +190,7 @@ question ─► ROUTER GATE ──advice──► canned refusal      (REFUSED, 
 ```
 
 Clean-architecture layering (`domain` / `application` / `ports` / `adapters`) is what lets
-the whole loop run against a scripted model and canned tools: **267 hermetic tests, no
+the whole loop run against a scripted model and canned tools: **306 hermetic tests, no
 network, no API key.**
 
 SQLite logs every query's tokens, cost and latency, and every CLI investigation's outcome,
@@ -378,8 +378,15 @@ built.
 - Fund-code resolution is a **name match**. It reports which code each scheme mapped to and
   flags ties as ambiguous, but a fund whose name has changed, or one AMFI lists oddly, can
   still resolve wrongly — so the mapping is always shown rather than applied silently.
-- Fund overlap uses disclosed **top-10** holdings, so it *understates* true overlap;
-  Indian MF full portfolios aren't on free APIs.
+- Fund overlap is computed on **ISIN** from each AMC's full monthly SEBI portfolio
+  disclosure, for the funds in `data/fund_holdings_snapshot.json` (7 of 10 today — the
+  other three block automated downloads). Two numbers come back and they are different
+  scales: weighted overlap is the share of each fund's *value* that is the same
+  securities, while the shared-name count runs much higher. A fund outside the snapshot
+  falls back to top-10 names, and a fund with neither is reported as **unknown overlap,
+  never zero** — scoring it as zero would inflate the diversification score for no reason
+  but our own data gaps. The snapshot is a **month-end** picture, published ~10 days in
+  arrears, so every figure carries its `as_of` date.
 - **Currency**: dollar-quoted holdings (US ETFs, crypto) are converted to rupees at each
   date's own USD/INR rate, so values carry the currency move. If the FX feed is
   unavailable the holding is still valued, at its unconverted price — a figure missing its
@@ -417,9 +424,10 @@ built.
 3. **Self-filing failures** — a rejected finding should append itself to the golden
    dataset; `CLAUDE.md` promises this and today it's manual.
 4. **CAS PDF ingestion.** Broker CSV statements now import directly (equity and MF); a
-   consolidated CAS PDF would cover every AMC in one upload. Also full-holdings overlap
-   via AMC factsheet parsing, so overlap stops being top-10-only.
-5. **A sandboxed `run_analysis(python_code)` tool** — lifts the ceiling from 17 fixed
+   consolidated CAS PDF would cover every AMC in one upload. Full-holdings overlap landed
+   (see above); what remains is widening the snapshot past ten funds and automating its
+   monthly refresh, including the AMCs that currently block automated downloads.
+5. **A sandboxed `run_analysis(python_code)` tool** — lifts the ceiling from 18 fixed
    tools to anything expressible in pandas, without breaking the no-arithmetic rule:
    the model writes code, Python still computes.
 

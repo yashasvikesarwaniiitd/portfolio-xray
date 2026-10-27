@@ -171,6 +171,37 @@ def fund_overlap(holdings_a: list[str], holdings_b: list[str]) -> float:
     return len(a & b) / min(len(a), len(b))
 
 
+def fund_overlap_by_isin(a: dict, b: dict) -> dict:
+    """Overlap between two funds' FULL disclosed holdings, keyed on ISIN.
+
+    `a` and `b` map ISIN -> that security's % of the fund. Two numbers come back because
+    they answer different questions and are easy to confuse:
+
+      overlap_pct        sum of min(weight) over the shared ISINs. "This much of each
+                         fund IS the same securities as the other." It is a share of
+                         portfolio VALUE, so a fund holding 40% debt can never show more
+                         than 60% equity overlap — correctly, because the debt is not
+                         duplicated exposure.
+      count_overlap_pct  shared names as a fraction of the smaller holdings list. This is
+                         the same shape as fund_overlap's top-10 answer, and it runs much
+                         higher: two funds sharing every large-cap name score near 100
+                         here while sharing perhaps 30% of their value.
+
+    Joining on ISIN rather than on names is the point. "Reliance Industries Ltd",
+    "Reliance Industries Limited" and "RELIANCE INDUSTRIES LTD." are one company and three
+    strings; INE002A01018 is one key.
+    """
+    if not a or not b:
+        raise ValueError("fund_overlap_by_isin: both holdings maps must be non-empty")
+    common = sorted(set(a) & set(b), key=lambda i: -min(a[i], b[i]))
+    return {
+        "overlap_pct": round(sum(min(a[i], b[i]) for i in common), 2),
+        "count_overlap_pct": round(100.0 * len(common) / min(len(a), len(b)), 1),
+        "common_isins": common,
+        "common_count": len(common),
+    }
+
+
 def lookthrough_exposure(direct_weight_pct: float,
                          fund_positions: list[tuple]) -> dict:
     """True exposure to one stock: its direct portfolio weight plus the weight held inside

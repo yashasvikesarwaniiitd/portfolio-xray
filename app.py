@@ -1065,21 +1065,34 @@ def page_analysis() -> None:
             '<div class="sec-t">Which market you\'re exposed to</div>'
             '<div class="sec-s">by geography</div></div>'
             + stacked(geo) +
-            '<div class="note">Funds are shown as one line each — free data does not '
-            'reveal the individual stocks inside Indian mutual funds, so no market-cap '
-            'look-through is claimed here.</div></div>', unsafe_allow_html=True)
+            '<div class="note">Funds are shown as one line each here. The stocks inside '
+            'them are broken out under "What you actually own" below, for the funds whose '
+            'full SEBI monthly disclosure is in the snapshot; no market-cap look-through '
+            'is claimed on this chart.</div></div>', unsafe_allow_html=True)
     with right:
         st.markdown('<div class="sec-t" style="margin:2px 0 12px">Worth a look</div>',
                     unsafe_allow_html=True)
         cards = []
         if ov.get("pairs"):
             p = ov["pairs"][0]
-            tone = "HIGH" if p["overlap_pct"] >= 40 else "MEDIUM"
-            cards.append(insight(
-                "Two funds own much the same thing", f'{p["overlap_pct"]:.0f}%',
-                f'{p["pair"]} share that share of their disclosed top-10 holdings. '
-                f'Two fee lines, largely one bet. (Top-10 basis, so the true figure is '
-                f'likely higher.)', tone))
+            full = p.get("basis") == "full_holdings_isin"
+            # The two bases are different scales, so the wording and the threshold both
+            # have to follow the basis. 40% of ten NAMES is ordinary; 25% of a fund's
+            # VALUE being the same securities is not.
+            tone = ("HIGH" if p["overlap_pct"] >= (25 if full else 40) else "MEDIUM")
+            if full:
+                shared = ", ".join((p.get("shared_top") or [])[:3])
+                body = (f'{p["pair"]} hold that share of their value in the same '
+                        f'securities — {p.get("common_count", 0)} companies in common'
+                        + (f', led by {shared}' if shared else '') + '. Two fee lines, '
+                        f'largely one bet. Full SEBI monthly disclosure, as of '
+                        f'{p.get("as_of", "—")}.')
+            else:
+                body = (f'{p["pair"]} share that share of their disclosed top-10 '
+                        f'holdings. Two fee lines, largely one bet. (Top-10 basis, so '
+                        f'the true figure is likely higher.)')
+            cards.append(insight("Two funds own much the same thing",
+                                 f'{p["overlap_pct"]:.0f}%', body, tone))
         if conc.get("top_holdings"):
             top = conc["top_holdings"]
             k4 = min(4, len(top))
@@ -1112,6 +1125,41 @@ def page_analysis() -> None:
                             "report uses.", "LOW")) + '</div>', unsafe_allow_html=True)
 
     st.write("")
+
+    # --- what you actually own (look-through) ---------------------------------------
+    # A fund name says nothing about exposure. This counts the same company through every
+    # fund that holds it. It is shown only when a full disclosure exists, and it states
+    # how much of the book it could see rather than implying it saw all of it.
+    lt = sec.get("lookthrough") or {}
+    if lt.get("top_exposures"):
+        as_of = ", ".join(lt.get("as_of") or []) or "—"
+        st.markdown(
+            '<div class="sec-head" style="margin:6px 0 12px"><div class="sec-t">What you '
+            'actually own</div><div class="sec-s">through your funds · as of '
+            f'{_html.escape(as_of)}</div></div>', unsafe_allow_html=True)
+        lt_rows = ['<div class="tbl"><div class="hd"><div>Company</div>'
+                   '<div class="ty">Funds</div><div>Share of portfolio</div>'
+                   '<div class="r">Reached via</div><div class="r">ISIN</div></div>']
+        for e in lt["top_exposures"]:
+            w = e["total_pct"]
+            via = ", ".join(v["fund"] for v in e["via"][:2])
+            if len(e["via"]) > 2:
+                via += f' +{len(e["via"]) - 2}'
+            lt_rows.append(
+                f'<div class="tr"><div>{_html.escape(e["name"] or e["isin"])}</div>'
+                f'<div class="ty">{e["held_via"]}</div>'
+                f'<div class="share"><div class="track">'
+                f'<div style="width:{min(w * 12, 100):.0f}%"></div></div>'
+                f'<span class="v">{w:.2f}%</span></div>'
+                f'<div class="r dim">{_html.escape(via)}</div>'
+                f'<div class="r muted">{_html.escape(e["isin"])}</div></div>')
+        lt_rows.append("</div>")
+        st.markdown("".join(lt_rows), unsafe_allow_html=True)
+        st.markdown(f'<div class="note">{_html.escape(lt["note"])} '
+                    f'{lt["distinct_companies"]} distinct companies sit behind the '
+                    f'{len(lt["funds_seen_through"])} fund(s) seen through.</div>',
+                    unsafe_allow_html=True)
+        st.write("")
 
     # --- holdings table -------------------------------------------------------------
     st.markdown('<div class="sec-head" style="margin:6px 0 12px"><div class="sec-t">Your '

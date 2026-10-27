@@ -305,6 +305,8 @@ async def analysis(request: Request, file: UploadFile | None = None):
         sections["allocation"] = safe(report_data.section_allocation, wrows, cache)
         sections["diversification"] = safe(report_data.section_diversification, wrows, penalty)
         sections["concentration"] = safe(report_data.section_concentration, wrows, cache)
+        # Must precede section_questions, which reads it to raise a look-through question.
+        sections["lookthrough"] = safe(report_data.section_lookthrough, wrows, cache)
         if report_data.LEVELS[level] >= 2:
             sections["cost"] = safe(report_data.section_cost, wrows, cache, total_value)
         sections["questions"] = safe(report_data.section_questions, sections)

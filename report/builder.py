@@ -263,7 +263,11 @@ def _sheet_sector(ws, sec, ch, ai):
 def _sheet_overlap(ws, sec, ch, ai):
     r = banner(ws, "5 · Fund Overlap", TELLS["overlap"])
     if sec.get("pairs"):
-        rows = [(p["pair"], p["overlap_pct"]) for p in sec["pairs"]]
+        # The basis belongs next to the number. A weighted full-holdings figure and a
+        # top-10 name count are different scales, and a column of bare percentages invites
+        # the reader to compare them.
+        rows = [(p["pair"] + (" (full holdings)" if p.get("basis") == "full_holdings_isin"
+                              else " (top-10)"), p["overlap_pct"]) for p in sec["pairs"]]
         t = table(ws, r, ["Fund pair", "Overlap %"], rows)
         put_img(ws, ch.get("overlap"), f"G{r}")
         r = max(t, r + CHART_ROWS - 2)
@@ -274,9 +278,10 @@ def _sheet_overlap(ws, sec, ch, ai):
                             "share. Above ~40% means the pair is largely one bet with two "
                             "fee lines."])
     r = good_looks(ws, r, "Healthy pairs sit under ~20% overlap. "
-                          f"({sec.get('funds_with_disclosed_holdings', 0)} of "
-                          f"{sec.get('funds_total', 0)} funds disclose top-10 holdings; "
-                          "pairs without disclosure are not shown.)")
+                          f"({sec.get('funds_with_full_holdings', 0)} of "
+                          f"{sec.get('funds_total', 0)} funds have a full monthly "
+                          "disclosure; pairs without one are not shown, and are not "
+                          "zero.)")
     r = note_box(ws, r, "ESTIMATE BASIS", [sec.get("note", "")], FILL_NOTE, F_MUTE, "ℹ️")
     ai_block(ws, r, ai)
 
@@ -458,11 +463,15 @@ def _methodology(wb, bundle):
          "40×min(effN/20,1) + 20×asset_spread + 20×geo_spread + 20×(1−overlap_penalty)"),
          "spread = 1−HHI over that grouping; overlap_penalty = max pairwise fund overlap"),
         ("Beta", "Daily-return regression vs NIFTY 50, ~2Y", "yfinance"),
-        ("Overlap", "Shared names in disclosed TOP-10 holdings", "Understates true overlap"),
+        ("Overlap", "Share of value in the same securities, joined on ISIN from the AMC's "
+                    "full monthly SEBI disclosure; falls back to shared names in a "
+                    "top-10 where no full disclosure is held",
+         "Month-end snapshot; top-10 pairs understate"),
         ("Expense ratios", "Latest disclosed TER via yfinance; Indian MF TERs n/a on free "
                            "APIs", "Marked n/a where undisclosed"),
-        ("Look-through exposure", "Direct weight + weight inside funds via top-10 "
-                                  "disclosures", "Estimate"),
+        ("Look-through exposure", "Fund weight × the company's weight inside that fund, "
+                                  "summed over funds with a full monthly disclosure",
+         "Covers only disclosed funds; coverage % stated"),
         ("Market-cap buckets", "INR: large ≥ ₹1L cr, mid ≥ ₹33k cr; USD: large ≥ $10B, "
                                "mid ≥ $2B", "Approximation"),
         ("AI Insights", "LLM reads each section's computed JSON; writes findings + "

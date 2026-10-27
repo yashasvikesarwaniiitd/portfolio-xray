@@ -22,6 +22,7 @@ from datetime import date, timedelta
 import yfinance as yf
 
 import agent
+import fund_holdings
 import metrics
 
 CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache.json")
@@ -311,29 +312,172 @@ def section_sector(rows: list[dict], cache: dict) -> dict:
                     "weights shown are % of that sleeve, renormalised."}
 
 
+def _fund_rows(rows: list[dict]) -> list[dict]:
+    return [r for r in rows if (r["type"] or "").lower() in ("etf", "mutual fund")]
+
+
+def _holdings_source(row: dict, cache: dict) -> dict:
+    """What we know about one fund's holdings, and how well.
+
+    Two sources, deliberately ranked. The committed monthly snapshot carries the FULL
+    disclosed portfolio with ISINs, which is what SEBI requires every AMC to publish;
+    yfinance carries ten names and no ISIN. Where both exist the snapshot wins, because an
+    overlap computed from ten names out of two hundred is not a smaller version of the
+    right answer, it is a different and much rougher one.
+    """
+    f = fund_holdings.match(row["name"])
+    if f and f.get("status") == "OK":
+        pos = fund_holdings.positions(f)
+        if pos:
+            return {"basis": "full_holdings_isin", "positions": pos, "fund": f,
+                    "as_of": f.get("as_of"), "names": fund_holdings.names_by_isin(f)}
+        # A fund-of-funds: disclosed, valid, and genuinely opaque at company level.
+        return {"basis": "no_look_through", "fund": f, "as_of": f.get("as_of")}
+    if row["symbol"] and row["source"] in ("yfinance",):
+        m = fetch_meta(row["symbol"], cache)
+        if m.get("top_holdings"):
+            return {"basis": "top10_names",
+                    "names_only": [t["name"] for t in m["top_holdings"]]}
+    return {"basis": "none",
+            "reason": (f or {}).get("unavailable_reason")
+                      or "no disclosed holdings available"}
+
+
 def section_overlap(rows: list[dict], cache: dict) -> dict:
-    funds = []
-    for r in rows:
-        if r["symbol"] and r["source"] in ("yfinance",) \
-                and (r["type"] or "").lower() in ("etf", "mutual fund"):
-            m = fetch_meta(r["symbol"], cache)
-            if m.get("top_holdings"):
-                funds.append((r["name"], [t["name"] for t in m["top_holdings"]]))
+    """How much of your funds is the same companies twice.
+
+    This used to see Indian mutual funds not at all. The old filter required a yfinance
+    symbol, and an Indian MF arrives through AMFI without one, so a book made entirely of
+    Indian funds produced an empty overlap table AND a diversification score with a zero
+    overlap penalty — the most flattering possible answer, for the least good reason.
+
+    Pairs are now computed on whichever basis both sides support, and each pair says which
+    one it used, because the two scales are not comparable. Weighted overlap on full
+    holdings ("this % of both funds is literally the same securities") runs well below
+    shared-name counts on top-10 lists, and reading one as the other overstates a book's
+    diversification or its duplication depending on which way you get it wrong.
+    """
+    fund_rows = _fund_rows(rows)
+    known, opaque, unknown = [], [], []
+    for r in fund_rows:
+        src = _holdings_source(r, cache)
+        if src["basis"] in ("full_holdings_isin", "top10_names"):
+            known.append((r, src))
+        elif src["basis"] == "no_look_through":
+            opaque.append({"fund": r["name"], "as_of": src.get("as_of"),
+                           "reason": "fund-of-funds — discloses units of another fund, "
+                                     "not companies"})
+        else:
+            unknown.append({"fund": r["name"], "reason": src.get("reason")})
+
     pairs = []
-    for i in range(len(funds)):
-        for j in range(i + 1, len(funds)):
-            ov = round(metrics.fund_overlap(funds[i][1], funds[j][1]) * 100, 0)
-            pairs.append({"pair": f"{funds[i][0]} × {funds[j][0]}", "overlap_pct": ov})
+    for i in range(len(known)):
+        for j in range(i + 1, len(known)):
+            (ra, sa), (rb, sb) = known[i], known[j]
+            label = f"{ra['name']} × {rb['name']}"
+            if sa["basis"] == sb["basis"] == "full_holdings_isin":
+                res = metrics.fund_overlap_by_isin(sa["positions"], sb["positions"])
+                shared = [sa["names"].get(k) or sb["names"].get(k)
+                          for k in res["common_isins"][:5]]
+                pairs.append({"pair": label, "overlap_pct": res["overlap_pct"],
+                              "count_overlap_pct": res["count_overlap_pct"],
+                              "common_count": res["common_count"],
+                              "shared_top": [n for n in shared if n],
+                              "basis": "full_holdings_isin",
+                              "as_of": sa.get("as_of") or sb.get("as_of")})
+            else:
+                # One side has only ten names, so the pair can only be answered on ten
+                # names. Comparing a full list against a top-10 on NAMES would score the
+                # fully disclosed fund down purely for disclosing more.
+                a = sa.get("names_only") or list((sa.get("names") or {}).values())[:10]
+                b = sb.get("names_only") or list((sb.get("names") or {}).values())[:10]
+                if not (a and b):
+                    continue
+                pairs.append({"pair": label, "basis": "top10_names",
+                              "overlap_pct": round(metrics.fund_overlap(a, b) * 100, 0)})
     pairs.sort(key=lambda p: -p["overlap_pct"])
-    n_funds_total = sum(1 for r in rows
-                        if (r["type"] or "").lower() in ("etf", "mutual fund"))
+
+    full = sum(1 for _, s in known if s["basis"] == "full_holdings_isin")
+    cov = fund_holdings.coverage()
+    as_of = sorted({p["as_of"] for p in pairs if p.get("as_of")})
+    note = ""
+    if full:
+        note += ("Overlap = the share of two funds that is the SAME securities, joined on "
+                 "ISIN from each AMC's full monthly SEBI disclosure "
+                 f"(as of {', '.join(as_of)}). ")
+    if any(p["basis"] == "top10_names" for p in pairs):
+        note += ("Pairs marked top10_names fall back to shared names in disclosed TOP-10 "
+                 "holdings; that number runs much higher than a weighted one and is not "
+                 "comparable with it. ")
+    if not pairs:
+        note += ("No pair of your funds has disclosed holdings available, so overlap is "
+                 "estimate-unavailable for this book. ")
+    note += (f"The holdings snapshot covers {cov['funds_available']} of "
+             f"{cov['funds_total']} funds; a fund missing from it is not shown as zero "
+             "overlap, it is not shown at all.")
     return {"pairs": pairs[:8],
             "max_overlap_pct": pairs[0]["overlap_pct"] if pairs else 0.0,
-            "funds_with_disclosed_holdings": len(funds),
-            "funds_total": n_funds_total,
-            "note": "Overlap = shared names in disclosed TOP-10 holdings only — true "
-                    "overlap is likely higher. Indian MF holdings are not disclosed via "
-                    "free APIs; those pairs are estimate-unavailable."}
+            "max_overlap_basis": pairs[0]["basis"] if pairs else None,
+            "funds_with_full_holdings": full,
+            "funds_with_disclosed_holdings": len(known),
+            "funds_total": len(fund_rows),
+            "opaque_funds": opaque,
+            "funds_without_holdings": unknown,
+            "as_of": as_of,
+            "note": note}
+
+
+def section_lookthrough(rows: list[dict], cache: dict, top_n: int = 12) -> dict:
+    """The companies you actually own, counting through the funds that hold them.
+
+    A fund name tells you nothing about what you are exposed to. Three funds can each look
+    like a separate decision and leave you with one position in the same large cap. This
+    adds up, for every company, the weight it carries inside each fund you hold times that
+    fund's weight in your portfolio — the identity metrics.lookthrough_exposure computes
+    for a single stock, applied across the whole book.
+
+    Funds without a full disclosure are EXCLUDED, not treated as holding nothing, and the
+    share of the portfolio this could see is reported alongside. A look-through covering
+    40% of a book is a useful answer; one that silently presents itself as covering all of
+    it is a wrong one.
+    """
+    fund_rows = _fund_rows(rows)
+    exposure: dict = {}
+    covered, seen_funds, as_of = 0.0, [], set()
+    for r in fund_rows:
+        f = fund_holdings.match(r["name"])
+        if not (f and f.get("status") == "OK"):
+            continue
+        pos = fund_holdings.positions(f)
+        if not pos:
+            continue
+        names = fund_holdings.names_by_isin(f)
+        covered += r["weight_pct"]
+        seen_funds.append(r["name"])
+        as_of.add(f.get("as_of"))
+        for isin, pct in pos.items():
+            e = exposure.setdefault(isin, {"name": names.get(isin), "pct": 0.0, "via": []})
+            contribution = r["weight_pct"] * pct / 100.0
+            e["pct"] += contribution
+            e["via"].append({"fund": r["name"], "pct_in_fund": round(pct, 2),
+                             "contributes_pct": round(contribution, 3)})
+    if not exposure:
+        return {"error": "no fund in this portfolio has a full disclosed holdings list"}
+    top = sorted(exposure.items(), key=lambda kv: -kv[1]["pct"])[:top_n]
+    return {
+        "top_exposures": [{"isin": i, "name": e["name"], "total_pct": round(e["pct"], 2),
+                           "held_via": len(e["via"]),
+                           "via": sorted(e["via"], key=lambda v: -v["contributes_pct"])}
+                          for i, e in top],
+        "distinct_companies": len(exposure),
+        "funds_seen_through": seen_funds,
+        "portfolio_pct_covered": round(covered, 1),
+        "as_of": sorted(a for a in as_of if a),
+        "note": ("Weights are % of the WHOLE portfolio, reached through the funds listed. "
+                 f"This sees through {len(seen_funds)} of {len(fund_rows)} funds, covering "
+                 f"{round(covered, 1)}% of the portfolio; direct stock holdings and funds "
+                 "with no disclosure are not included."),
+    }
 
 
 def _beta_of(symbol: str, market_close) -> float | None:
@@ -417,9 +561,20 @@ def section_questions(sections: dict) -> dict:
     ov = sections.get("overlap", {})
     if ov.get("pairs"):
         p = ov["pairs"][0]
-        if p["overlap_pct"] >= 40:
+        # Two bases, two thresholds. 40% of ten disclosed NAMES is common and mild; 25% of
+        # a fund's VALUE being the same securities as another fund's is not. One threshold
+        # across both would either never fire on full holdings or fire constantly on
+        # top-10.
+        trigger = 25 if p["basis"] == "full_holdings_isin" else 40
+        if p["overlap_pct"] >= trigger:
             qs.append(("HIGH", f"{p['pair']} overlap at {p['overlap_pct']:.0f}% — do both "
                                "need to exist, or is one doing the work of two?", "Overlap"))
+    lt = sections.get("lookthrough") or {}
+    for e in (lt.get("top_exposures") or [])[:1]:
+        if e["held_via"] > 1 and e["total_pct"] >= 3:
+            qs.append(("MEDIUM", f"{e['name']} reaches {e['total_pct']:.1f}% of the "
+                                 f"portfolio through {e['held_via']} different funds — was "
+                                 "that one decision or several?", "Look-through"))
     lt = (sections.get("concentration", {}) or {}).get("lookthrough") or {}
     if lt.get("total_pct") and lt.get("via"):
         qs.append(("HIGH", f"Is ~{lt['total_pct']:.0f}% look-through {lt['stock']} "
@@ -474,6 +629,7 @@ def assemble(portfolio_path: str) -> dict:
         sections["allocation"] = safe(section_allocation, rows, cache)
         sections["diversification"] = safe(section_diversification, rows, overlap_penalty)
         sections["concentration"] = safe(section_concentration, rows, cache)
+        sections["lookthrough"] = safe(section_lookthrough, rows, cache)
         sections["sector"] = safe(section_sector, rows, cache)
     if LEVELS[level] >= 2:
         sections["risk"] = safe(section_risk, rows)

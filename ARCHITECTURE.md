@@ -151,7 +151,7 @@ reported separately rather than letting a sale masquerade as lost market value.
 Arrows point inward. `domain/` imports nothing but the standard library and `metrics.py`
 (itself pure, network-free math). `application/` depends on `domain` and `ports`, never on
 an adapter. That is what lets the entire loop be tested with a scripted model and canned
-tools — **267 hermetic tests, no network, no API key**.
+tools — **306 hermetic tests, no network, no API key**.
 
 An honest caveat, since updated by events: `ports/llm.py` was written as a **test seam,
 not provider independence** — `assistant_content` is handed back verbatim, so its shape was
@@ -501,8 +501,10 @@ unit tests and skipped the live trace.
 3. **Self-filing failures.** `CLAUDE.md` promises every production failure becomes a golden
    dataset pair; today that is manual. A rejected finding or a `FAILED` outcome should append
    itself.
-4. **Full-portfolio overlap.** Overlap is top-10-only because Indian MF holdings are not in
-   any free API. Parsing AMC factsheet PDFs is the real fix.
+4. **Widening the holdings snapshot.** Overlap and look-through now run on full SEBI
+   monthly disclosures joined on ISIN (`fund_holdings.py`, `data/fund_holdings_snapshot.json`),
+   but the snapshot is ten funds collected by hand and refreshed manually. Automating the
+   collection — and reaching the AMCs that block automated downloads — is the remaining work.
 5. **A sandboxed analysis tool.** `run_analysis(python_code)` over the portfolio dataframe
-   would lift the ceiling from "13 tools" to "anything expressible in pandas", without
+   would lift the ceiling from "18 tools" to "anything expressible in pandas", without
    breaking the no-arithmetic rule — the model writes code, Python still computes.

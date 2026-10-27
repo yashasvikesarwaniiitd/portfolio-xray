@@ -3,7 +3,8 @@
 An agentic portfolio analytics assistant: ingests a stock/MF portfolio, fetches
 live market data (yfinance for prices/sector data, AMFI/mftool for MF NAVs,
 Google News RSS for citable news), computes risk metrics (beta, XIRR, Sharpe
-using RBI 10Y G-Sec yield, concentration, fund overlap via top-10 holdings)
+using RBI 10Y G-Sec yield, concentration, fund overlap on ISIN from full SEBI
+monthly disclosures)
 via deterministic Python tools, and explains results with citations.
 
 ## Hard rules
@@ -38,9 +39,13 @@ reconstructed, and it can express SELLS, which the SIP sheet cannot.
 ## Data sources (all free)
 - Prices, indices, sector classification: yfinance
 - Mutual fund NAVs: AMFI daily NAV feed via mftool
-- Fund holdings (for overlap): top-10 disclosed holdings per fund only —
-  full-portfolio overlap needs scraping AMC factsheet PDFs, deferred as a
-  stretch goal
+- Fund holdings (for overlap and look-through): each AMC's FULL monthly SEBI
+  portfolio disclosure, collected out of band and committed as
+  `data/fund_holdings_snapshot.json` with an as-of date and source URL per fund.
+  Nothing fetches it at request time. Funds outside the snapshot fall back to
+  yfinance top-10 names, and a fund with neither is reported as unknown — never
+  as zero overlap. Refresh is manual, on the same monthly cadence as the G-Sec
+  yield; see `data/FUND_HOLDINGS_SOURCES.md`.
 - News for citations: Google News RSS (free, no key required)
 - Risk-free rate (for Sharpe): RBI 10Y G-Sec yield, updated manually on a
   monthly cadence — no reliable free live API exists for this

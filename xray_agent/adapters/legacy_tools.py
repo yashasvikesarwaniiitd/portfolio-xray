@@ -178,10 +178,26 @@ SCHEMAS = [
     {
         "name": "fund_overlap",
         "description":
-            "Pairwise overlap between funds/ETFs held, computed from each fund's DISCLOSED "
-            "TOP-10 HOLDINGS ONLY — true overlap is likely higher, and Indian mutual funds "
-            "do not publish holdings through free APIs, so many pairs are unavailable. "
-            "Always state the top-10 basis when reporting this.",
+            "Pairwise overlap between the funds/ETFs held. Every pair carries a 'basis' "
+            "and the two bases are NOT comparable, so always report which one a number "
+            "came from. basis=full_holdings_isin is the share of each fund's VALUE that "
+            "is the same securities as the other, joined on ISIN from the AMC's full "
+            "monthly SEBI disclosure — it also carries count_overlap_pct (shared names, "
+            "which runs much higher) and shared_top. basis=top10_names is shared names in "
+            "a disclosed top-10 only, and understates true overlap. The disclosure is a "
+            "month-end snapshot: quote its 'as_of' date. Funds listed under "
+            "funds_without_holdings or opaque_funds have UNKNOWN overlap, never zero.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "fund_lookthrough",
+        "description":
+            "The companies the portfolio actually owns, counted through the funds that "
+            "hold them: for each company, its weight inside each fund times that fund's "
+            "weight in the portfolio. Use this to answer 'how much of X do I really own' "
+            "and to find a single company reached through several funds. Only funds with "
+            "a full disclosed holdings list are included — read portfolio_pct_covered and "
+            "say what share of the book this could see, and quote the as_of date.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {
@@ -341,6 +357,8 @@ class LegacyTools:
             return self._concentration()
         if name == "fund_overlap":
             return self._fund_overlap()
+        if name == "fund_lookthrough":
+            return self._fund_lookthrough()
         if name == "load_portfolio":
             return agent.load_portfolio(self.ctx.path)
         if name == "beta":
@@ -425,4 +443,10 @@ class LegacyTools:
         from report import data as report_data
         self.ctx.load()
         out = report_data.section_overlap(self.ctx.holdings, self._meta_cache)
+        return json.dumps(out)
+
+    def _fund_lookthrough(self) -> str:
+        from report import data as report_data
+        self.ctx.load()
+        out = report_data.section_lookthrough(self.ctx.holdings, self._meta_cache)
         return json.dumps(out)
