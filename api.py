@@ -194,8 +194,13 @@ async def chat(request: Request):
             return JSONResponse(status_code=400, content={"answer": str(e)})
     try:
         # answer_query routes first: advice/offtopic short-circuit before any tool runs.
+        # `no_portfolio` is sent by a frontend with nothing loaded. Without it the server's
+        # default (sample) book answers, which is right for a caller that asked for the sample
+        # and wrong for one that has not chosen a portfolio at all.
+        has_portfolio = bool(temp_path) or not body.get("no_portfolio")
         result = agent.answer_query(client(), list(history), message, {},
-                                    path=temp_path or agent.DEFAULT_PORTFOLIO)
+                                    path=temp_path or agent.DEFAULT_PORTFOLIO,
+                                    has_portfolio=has_portfolio)
     except Exception:
         # Missing/invalid API key or upstream outage must degrade, not 500.
         return JSONResponse(status_code=503, content={

@@ -114,7 +114,7 @@ uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py \
   -m "not regression" -q
 ```
 
-**403 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
+**421 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
 verification, prompt injection, provider translation) is tested as deterministic logic.
 266 pass and one skips unless the optional `tracing` extra is installed
 (`uv sync --extra tracing`).
@@ -190,7 +190,7 @@ question ─► ROUTER GATE ──advice──► canned refusal      (REFUSED, 
 ```
 
 Clean-architecture layering (`domain` / `application` / `ports` / `adapters`) is what lets
-the whole loop run against a scripted model and canned tools: **403 hermetic tests, no
+the whole loop run against a scripted model and canned tools: **421 hermetic tests, no
 network, no API key.**
 
 SQLite logs every query's tokens, cost and latency, and every CLI investigation's outcome,

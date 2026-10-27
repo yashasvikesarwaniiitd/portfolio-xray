@@ -1392,15 +1392,32 @@ OFFTOPIC_REDIRECT = (
     "investments. Ask me about your portfolio's value, returns (XIRR), risk (beta, Sharpe, "
     "concentration), a fund's NAV, or a stock's price history."
 )
+NO_PORTFOLIO_REPLY = (
+    "There's no portfolio loaded yet, so I have nothing to look at. Upload your statement "
+    "(CSV or Excel) or load the sample from the left sidebar, and I'll answer from it. In "
+    "the meantime I can still explain concepts - what XIRR, HHI or fund overlap mean - or "
+    "look up news on a company."
+)
+
+
 def answer_query(client: anthropic.Anthropic, messages: list, user_text: str,
                  state: dict | None = None, log: bool = True,
-                 path: str = DEFAULT_PORTFOLIO) -> dict:
+                 path: str = DEFAULT_PORTFOLIO, has_portfolio: bool = True) -> dict:
     """Route the query, then dispatch. `advice`/`offtopic` short-circuit before any tool runs;
     `news` fetches cited news (evaluator-optimizer refetch + synthesis); `education` answers
     with no tools; `analytics` runs the tool loop. `state` tracks the consecutive-refusal
     streak so we harden the refusal on repeats. Per-query cost + latency are logged to SQLite.
-    Returns {category, answer, tools_used, refused, subtype?}."""
+    Returns {category, answer, tools_used, refused, subtype?}.
+
+    `has_portfolio=False` means the caller has no portfolio loaded. A question that needs one
+    (analytics) is then answered honestly - nothing to look at - instead of silently running
+    against `path`, which defaults to the SERVER's sample book: a person who had uploaded
+    nothing was told how concentrated they were in ETFs and Bitcoin they had never held.
+    Everything that does not need a portfolio (education, advice refusals, off-topic, news
+    about a named company) is unchanged."""
     state = {} if state is None else state
+    if not has_portfolio:
+        path = ""      # no file: nothing for the news path to read holdings from
     usage = logger.Usage()
     started = time.perf_counter()
     route = router.classify(client, user_text, usage=usage)
@@ -1448,6 +1465,11 @@ def answer_query(client: anthropic.Anthropic, messages: list, user_text: str,
         answer = answer_without_tools(client, messages, usage=usage)
         return _finish({"category": category, "answer": answer, "tools_used": [],
                         "refused": False})
+
+    if not has_portfolio:
+        messages.append({"role": "assistant", "content": NO_PORTFOLIO_REPLY})
+        return _finish({"category": category, "answer": NO_PORTFOLIO_REPLY,
+                        "tools_used": [], "refused": False, "no_portfolio": True})
 
     # analytics: the Investigator, not a second tool loop of our own. The route is handed
     # over rather than re-derived, so the gate is paid for once; `messages[:-1]` is the

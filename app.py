@@ -1233,6 +1233,10 @@ def page_ask() -> None:
         # History excludes the pending question — the backend appends it itself.
         history = [{"role": r, "content": t} for r, t, _ in ss.chat[:-1]]
         payload = {"message": ss.pending, "history": history}
+        if not ss.analysis:
+            # Nothing is loaded, so say so. Otherwise the backend answers about ITS sample
+            # book as if it were the reader's own.
+            payload["no_portfolio"] = True
         # Without this the backend falls back to the SERVER's default portfolio, so the
         # analyst answers about the sample while the dashboard beside it shows the user's
         # own book — two different portfolios described as one. /chat accepts the CSV in
