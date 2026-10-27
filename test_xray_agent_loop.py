@@ -634,3 +634,181 @@ def test_the_chat_turns_tokens_reach_the_usage_sink_including_the_gates():
     inp, out = usage.totals()
     assert inp > 0 and out > 0
     assert usage.cost_usd() > 0
+
+
+# --- did it follow its own evidence? -------------------------------------------------------
+# The divergence check asks whether two sequences differ, which rules out a script and
+# nothing more. These cover the stronger question: having been told which holding moved the
+# book, does the agent go to THAT one?
+
+def _ev(eid, tool, args=None, result="", error=None):
+    from xray_agent.domain.models import Evidence
+    return Evidence(id=eid, tool=tool, args=args or {}, result=result, error=error)
+
+
+def _attribution(*contributors, uncovered=()):
+    return json.dumps({
+        "window": {"start": "2026-09-01", "end": "2026-09-30"},
+        "change": -6511.23, "coverage_pct": 96.7,
+        "contributors": [
+            {"name": n, "status": "attributed", "market_effect": m} for n, m in contributors
+        ] + [{"name": n, "status": "uncovered", "invested": 6000.0} for n in uncovered],
+    })
+
+
+def _ledger(*evs):
+    return {e.id: e for e in evs}
+
+
+def test_mentions_matches_a_symbol_against_the_name_the_evidence_used():
+    """The tool is called with ICICIBANK.NS; the evidence calls it "ICICI Bank". An exact
+    comparison never fires, which is how a check like this quietly passes forever."""
+    from xray_agent.domain import drilldown as dd
+    assert dd.mentions("ICICI Bank", "ICICIBANK.NS")
+    assert dd.mentions("TCS", "TCS.NS")
+    assert dd.mentions("Parag Parikh Flexi Cap", "parag parikh flexi cap direct growth")
+    assert dd.mentions("Reliance Industries", "news about Reliance this month")
+
+
+def test_mentions_does_not_match_on_the_word_two_holdings_share():
+    """Matching on the last word would make every bank a match for every other bank, and
+    the check would report FOLLOWED no matter which one the agent picked."""
+    from xray_agent.domain import drilldown as dd
+    assert not dd.mentions("ICICI Bank", "HDFCBANK.NS")
+    assert not dd.mentions("Axis Flexi Cap", "Parag Parikh Flexi Cap")
+    assert not dd.mentions("", "anything")
+    assert not dd.mentions("Hi There", "hi")          # first word under three characters
+
+
+def test_the_flagged_holding_is_the_biggest_mover_not_the_first_listed():
+    """Chosen by the data. If the test picked, the test would be asserting its own opinion."""
+    from xray_agent.domain import drilldown as dd
+    led = _ledger(_ev("E1", "attribute_move",
+                      result=_attribution(("TCS", -100.0), ("ICICI Bank", -2372.95),
+                                          ("Infosys", 50.0), uncovered=["Smallcase"])))
+    flag = dd.flagged_holding(led)
+    assert flag.name == "ICICI Bank"
+    assert flag.market_effect == -2372.95       # sign preserved for a readable verdict
+    assert flag.evidence_id == "E1"
+    assert flag.runner_up == "TCS"
+    assert flag.decisive                         # 2372.95 is well clear of 100
+
+
+def test_a_failed_or_absent_attribution_flags_nothing():
+    """No flag is not the same as an ignored flag, and the caller must not read it that way."""
+    from xray_agent.domain import drilldown as dd
+    assert dd.flagged_holding(_ledger(_ev("E1", "concentration", result="{}"))) is None
+    assert dd.flagged_holding(_ledger(
+        _ev("E1", "attribute_move", result="Error: boom", error="boom"))) is None
+    assert dd.flagged_holding(_ledger(_ev("E1", "attribute_move", result="not json"))) is None
+
+
+def test_only_holding_specific_calls_made_after_the_flag_count_as_drilling():
+    """concentration and sharpe look at the whole book, so they say nothing about which
+    holding was chosen. And a call made BEFORE the attribution cannot have followed it."""
+    from xray_agent.domain import drilldown as dd
+    led = _ledger(
+        _ev("E1", "holding_units", args={"symbol": "TCS.NS"}),        # before the flag
+        _ev("E2", "attribute_move", result=_attribution(("ICICI Bank", -2372.95))),
+        _ev("E3", "concentration", result="{}"),                       # whole-portfolio
+        _ev("E4", "beta", args={"symbol": "ICICIBANK.NS"}),
+    )
+    targets = dd.drill_targets(led, after="E2")
+    assert [(t.evidence_id, t.tool, t.text) for t in targets] == [
+        ("E4", "beta", "ICICIBANK.NS")]
+
+
+def test_followed_when_the_agent_goes_to_the_holding_the_evidence_flagged():
+    from xray_agent.domain import drilldown as dd
+    led = _ledger(
+        _ev("E1", "attribute_move",
+            result=_attribution(("ICICI Bank", -2372.95), ("Infosys", -80.0))),
+        _ev("E2", "get_news", args={"query": "ICICI Bank share price fall"}),
+    )
+    v = dd.evaluate(led)
+    assert v.verdict == dd.FOLLOWED and v.followed
+    assert "ICICI Bank" in v.detail and "get_news" in v.detail
+
+
+def test_diverged_when_it_drills_into_a_different_holding_and_the_detail_names_it():
+    """The failure has to say what it did instead, or it is unactionable."""
+    from xray_agent.domain import drilldown as dd
+    led = _ledger(
+        _ev("E1", "attribute_move",
+            result=_attribution(("ICICI Bank", -2372.95), ("Infosys", -80.0))),
+        _ev("E2", "holding_units", args={"symbol": "INFY.NS"}),
+    )
+    v = dd.evaluate(led)
+    assert v.verdict == dd.DIVERGED
+    assert "ICICI Bank" in v.detail and "INFY.NS" in v.detail
+    assert v.drilled == ["INFY.NS"]
+
+
+def test_a_near_tie_weakens_the_diverged_verdict_in_the_detail():
+    """ICICI Bank -2372.95 against TCS -2330.02 is the real demo_b fixture. The evidence
+    named both; calling the agent wrong for picking the second would be the test's error,
+    not the agent's."""
+    from xray_agent.domain import drilldown as dd
+    led = _ledger(
+        _ev("E1", "attribute_move",
+            result=_attribution(("ICICI Bank", -2372.95), ("TCS", -2330.02))),
+        _ev("E2", "holding_units", args={"symbol": "TCS.NS"}),
+    )
+    v = dd.evaluate(led)
+    assert v.verdict == dd.DIVERGED
+    assert "almost as much" in v.detail and "TCS" in v.detail
+
+
+def test_no_drill_is_its_own_verdict_and_not_a_quiet_pass():
+    """An agent that answers from the attribution alone is being reasonable, and has also
+    not demonstrated the thing under test. Scoring that as success is how an eval ends up
+    measuring nothing."""
+    from xray_agent.domain import drilldown as dd
+    led = _ledger(
+        _ev("E1", "attribute_move", result=_attribution(("ICICI Bank", -2372.95))),
+        _ev("E2", "concentration", result="{}"),
+    )
+    v = dd.evaluate(led)
+    assert v.verdict == dd.NO_DRILL
+    assert not v.followed
+    assert "ICICI Bank" in v.detail
+
+
+def test_a_finding_that_names_the_flagged_holding_counts_as_following_it():
+    """Concluding from the attribution is a legitimate way to act on it. Demanding a second
+    tool call would reward the agent for spending budget it did not need."""
+    from xray_agent.domain import drilldown as dd
+    led = _ledger(_ev("E1", "attribute_move", result=_attribution(("ICICI Bank", -2372.95))))
+    v = dd.evaluate(led, claims=["ICICI Bank fell 8.09% and cost the portfolio 2372.95."])
+    assert v.verdict == dd.FOLLOWED
+    assert "no second tool call" in v.detail
+
+
+def test_the_flagged_holding_parses_the_real_recorded_attribute_move_output():
+    """Every test above builds its own attribution, so all of them would still pass if the
+    real tool returned a different shape. This one reads the recorded fixture the evals
+    actually replay, which is the only way to find out that `contributors` was renamed or
+    `market_effect` moved."""
+    import os
+    from xray_agent.domain import drilldown as dd
+    path = os.path.join("evals", "fixtures", "portfolio.demo_b.tools.json")
+    fixture = json.load(open(path, encoding="utf-8"))
+    keys = [k for k in fixture if json.loads(k).get("tool") == "attribute_move"]
+    assert keys, "the fixture has no attribute_move recording"
+
+    checked = 0
+    for k in keys:
+        body = fixture[k]
+        content = body["content"] if isinstance(body, dict) else body
+        if "contributors" not in content:
+            continue
+        flag = dd.flagged_holding(_ledger(_ev("E1", "attribute_move", result=content)))
+        assert flag is not None, f"nothing flagged from a real attribution: {k}"
+        assert flag.name and isinstance(flag.market_effect, float)
+        # it must be the biggest mover in that recording, not merely the first listed
+        contributors = [c for c in json.loads(content)["contributors"]
+                        if c.get("status") == "attributed"]
+        biggest = max(contributors, key=lambda c: abs(float(c["market_effect"])))
+        assert flag.name == biggest["name"], f"{flag.name} != {biggest['name']} for {k}"
+        checked += 1
+    assert checked >= 3, f"only {checked} real attributions exercised"

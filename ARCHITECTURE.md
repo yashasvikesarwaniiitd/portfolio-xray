@@ -52,7 +52,14 @@ the agent is following a script and the claim in this section is false.
 >
 > Distinguishing real adaptation from sampling noise needs more than a tool-count
 > comparison — something like whether the holding the agent drills into is the one the
-> evidence flagged. That is not built, and saying so is more useful than a greener number.
+> evidence flagged. **That check now exists** (`domain/drilldown.py`, reported by
+> `agent_evals.py` as `evidence-led drill-down`): `attribute_move` ranks every holding by
+> how much it moved the book, and the check asks whether the agent's next holding-specific
+> call went to the top of that ranking. The flagged holding is picked by the data, never by
+> the author of the check, and a run that drills into no holding is recorded as an
+> abstention rather than a pass. **It has not yet been run against live model decisions**,
+> so there is no rate to quote here and this paragraph will say what it finds, not what I
+> hope it finds.
 
 What it is **not**: there is no multi-agent fan-out, no autonomous scheduling, no persistent
 memory between runs. Those are on the ladder in §8, not in the code. The agency here is in
@@ -122,7 +129,7 @@ reported separately rather than letting a sale masquerade as lost market value.
 Arrows point inward. `domain/` imports nothing but the standard library and `metrics.py`
 (itself pure, network-free math). `application/` depends on `domain` and `ports`, never on
 an adapter. That is what lets the entire loop be tested with a scripted model and canned
-tools — **244 hermetic tests, no network, no API key**.
+tools — **255 hermetic tests, no network, no API key**.
 
 An honest caveat, since updated by events: `ports/llm.py` was written as a **test seam,
 not provider independence** — `assistant_content` is handed back verbatim, so its shape was

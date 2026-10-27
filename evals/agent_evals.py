@@ -48,7 +48,7 @@ from xray_agent.adapters.legacy_tools import SCHEMAS  # noqa: E402
 from xray_agent.adapters.replay_tools import FaultInjectingTools, ReplayTools  # noqa: E402
 from xray_agent.adapters.sqlite_run_store import SqliteRunStore  # noqa: E402
 from xray_agent.application.investigator import Investigator  # noqa: E402
-from xray_agent.domain import policies  # noqa: E402
+from xray_agent.domain import drilldown, policies  # noqa: E402
 from xray_agent.domain.models import Budget, RunOutcome  # noqa: E402
 from xray_agent.interfaces.cli import build_llm  # noqa: E402
 
@@ -189,8 +189,14 @@ def run_case(case, llm, verbose: bool, budget: Budget, provider: str) -> dict:
     state = agent.investigate(case["question"], case["portfolio"])
 
     called = [ev.tool for ev in state.ledger.values()]
-    texts = [f.claim for f in state.verified_findings] + [state.summary]
+    claims = [f.claim for f in state.verified_findings]
+    texts = claims + [state.summary]
     failures = []
+
+    # Reported, never gating. Whether the agent follows its own evidence is the open
+    # research question this suite exists to make measurable; turning one run of it into a
+    # red build would be the same mistake as quoting a single divergence run as proof.
+    drill = drilldown.evaluate(state.ledger, claims=claims)
 
     allowed = case.get("allow_outcomes") or [case["expect_outcome"]]
     if state.outcome not in allowed:
@@ -235,6 +241,9 @@ def run_case(case, llm, verbose: bool, budget: Budget, provider: str) -> dict:
         "verified": len(state.verified_findings),
         "rejected": len(state.rejected_findings),
         "summary": state.summary,
+        "drilldown": drill.verdict,
+        "drilldown_detail": drill.detail,
+        "flagged": drill.flagged,
     }
     if verbose:
         print(json.dumps(row, indent=2))
@@ -285,6 +294,31 @@ def divergence_check(rows: list, extra_pairs: list | None = None) -> tuple:
                             "--divergence-runs 3. " + detail)
         return "PASS", detail
     return "MIXED", detail
+
+
+def drilldown_summary(rows: list) -> tuple:
+    """The question divergence cannot answer: having been told which holding moved the
+    book, does the agent go to THAT one?
+
+    Reported as a rate over the runs that could answer it. NO_DRILL runs are counted and
+    shown apart rather than folded into either side — an agent that answered from the
+    attribution alone has not failed, it has abstained, and averaging abstentions into a
+    score is how a number stops meaning anything. A suite where every run abstains returns
+    N-A, which is the honest reading of "we learned nothing today".
+    """
+    graded = [r for r in rows
+              if r.get("drilldown") in (drilldown.FOLLOWED, drilldown.DIVERGED)]
+    abstained = [r for r in rows if r.get("drilldown") == drilldown.NO_DRILL]
+    followed = [r for r in graded if r["drilldown"] == drilldown.FOLLOWED]
+    if not graded:
+        return "N-A", (f"no run drilled into a holding ({len(abstained)} abstained), so "
+                       "this says nothing either way")
+    detail = f"followed the evidence in {len(followed)} of {len(graded)} run(s) that drilled"
+    if abstained:
+        detail += f"; {len(abstained)} drilled into no holding and are not counted"
+    verdict = ("PASS" if len(followed) == len(graded)
+               else "FAIL" if not followed else "MIXED")
+    return verdict, detail
 
 
 # --- cli --------------------------------------------------------------------------------
@@ -422,14 +456,20 @@ def main() -> int:
     print(f"\n{passed}/{len(rows)} cases passed | total Rs {total_cost:.2f}   ({spend})")
     print(f"tool-sequence divergence: {verdict} - {detail}")
 
+    d_verdict, d_detail = drilldown_summary(rows)
+    print(f"evidence-led drill-down:  {d_verdict} - {d_detail}")
+    for r in rows:
+        if r.get("flagged"):
+            print(f"    {r['id']:<22} {r['drilldown']:<9} {r['drilldown_detail']}")
+
     _write_report(args.out, rows, passed, total_cost, by_provider, verdict, detail,
-                  warnings)
+                  warnings, d_verdict, d_detail)
     print(f"\nwrote {args.out}")
     return 0 if passed == len(rows) and verdict != "FAIL" else 1
 
 
 def _write_report(path, rows, passed, total_cost, by_provider, verdict, detail,
-                  warnings) -> None:
+                  warnings, drill_verdict="N-A", drill_detail="") -> None:
     used = ", ".join(
         f"`{p}` ({sorted({r['model'] for r in rows if r['provider'] == p})[0]})"
         for p in sorted(by_provider))
@@ -458,6 +498,24 @@ def _write_report(path, rows, passed, total_cost, by_provider, verdict, detail,
               "investigating. Both halves must run on the SAME provider, or the comparison "
               "is between models rather than portfolios.", "",
               f"**{verdict}** — {detail}", ""]
+    lines += ["## Evidence-led drill-down", "",
+              "Divergence shows that two sequences differ, which rules out a fixed script "
+              "and nothing more. This asks the stronger question: `attribute_move` ranks "
+              "every holding by how much it moved the book, so when the agent then drills "
+              "into a holding, is it the one the evidence flagged? The flagged holding is "
+              "the largest absolute market effect among the contributors the tool returned "
+              "— chosen by the data, never by the author of the check.", "",
+              "A run that drills into no holding is **not** counted as a pass. It has "
+              "abstained, not succeeded, and folding abstentions into the rate is how a "
+              "number stops meaning anything.", "",
+              f"**{drill_verdict}** — {drill_detail}", ""]
+    per_case = [r for r in rows if r.get("flagged")]
+    if per_case:
+        lines += ["| case | verdict | what the evidence flagged, and what it did |",
+                  "|---|---|---|"]
+        lines += [f"| `{r['id']}` | {r['drilldown']} | {r['drilldown_detail']} |"
+                  for r in per_case]
+        lines += [""]
     if warnings:
         lines += ["## Warnings", ""] + [f"- {w}" for w in warnings] + [""]
     failures = [(r["id"], f) for r in rows for f in r["failures"]]

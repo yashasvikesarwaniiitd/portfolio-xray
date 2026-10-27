@@ -111,9 +111,9 @@ uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py \
   test_xray_agent_evalrouting.py test_xray_agent_broker.py -m "not regression" -q
 ```
 
-**244 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
+**255 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
 verification, prompt injection, provider translation) is tested as deterministic logic.
-243 pass and one skips unless the optional `tracing` extra is installed
+254 pass and one skips unless the optional `tracing` extra is installed
 (`uv sync --extra tracing`).
 
 Then, with `ANTHROPIC_API_KEY` or `GROQ_API_KEY` in `.env`:
@@ -191,7 +191,7 @@ question ─► ROUTER GATE ──advice──► canned refusal      (REFUSED, 
 ```
 
 Clean-architecture layering (`domain` / `application` / `ports` / `adapters`) is what lets
-the whole loop run against a scripted model and canned tools: **244 hermetic tests, no
+the whole loop run against a scripted model and canned tools: **255 hermetic tests, no
 network, no API key.**
 
 SQLite logs every query's tokens, cost and latency, and every investigation's outcome,
@@ -358,10 +358,12 @@ built.
 
 ## What I'd build next
 
-1. **A better divergence test** — the current one rules out a fixed script and nothing
-   more. Checking whether the agent drills into the holding the evidence flagged would
-   test adaptation rather than mere variation. This is the honest gap in the headline
-   claim, and it is still not built.
+1. **Run the new drill-down check and publish whatever it says.** Divergence rules out a
+   fixed script and nothing more; the drill-down check (`domain/drilldown.py`) asks whether
+   the agent goes to the holding its own evidence flagged, and `agent_evals.py` reports it.
+   It is built and unit-tested against the recorded fixtures, but it has **not yet been run
+   against live model decisions**, so there is no rate here yet. If it comes back MIXED or
+   FAIL, that number goes in this README — the check was built to be able to say no.
 2. **L2, the scheduled watcher** — the weekly digest becomes a cron-triggered run that
    decides what is *worth* reporting and stays quiet when nothing moved.
 3. **Self-filing failures** — a rejected finding should append itself to the golden
