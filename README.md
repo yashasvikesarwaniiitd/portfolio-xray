@@ -9,10 +9,12 @@ and provably refuses to give advice.**
 ![evals](https://github.com/yashasvikesarwaniiitd/portfolio-xray/actions/workflows/evals.yml/badge.svg)
 
 The hosted demo is the **assistant** — chat, dashboard, Excel health report. The
-**Investigator** (the agent, below) runs from the CLI and is deliberately not exposed on a
-public endpoint: one investigation costs ₹0.11–0.25 of real inference, and putting that
-behind an open URL on a personal API key is a liability, not a feature. Run it yourself in
-60 seconds — it needs no network for market data.
+**Investigator** (the agent, below) is the loop behind every analytics chat turn, on a
+tighter budget than the CLI gets: 6 steps / ₹2 / 45s rather than 12 / ₹10 / 120s, because
+someone is watching a spinner. What is *not* exposed is a public `/investigate` endpoint
+that would run a full 12-step investigation on an open URL against a personal API key —
+that is a liability, not a feature. The CLI is where you get the whole loop, the console
+trace and the stored run history. It takes 60 seconds and needs no network for market data.
 
 ---
 
@@ -119,7 +121,8 @@ verification, prompt injection, provider translation) is tested as deterministic
 Then, with `ANTHROPIC_API_KEY` or `GROQ_API_KEY` in `.env`:
 
 ```bash
-uv run python -m xray_agent investigate "Why is my portfolio down this month?"     --portfolio portfolio.demo_b.csv --mode replay --today 2026-10-26
+uv run python -m xray_agent investigate "Why is my portfolio down this month?" \
+  --portfolio portfolio.demo_b.csv --mode replay --today 2026-10-26
 ```
 
 `--mode replay` serves market data from recorded fixtures, so it cannot fail on bad wifi.
@@ -142,12 +145,6 @@ decomposes this exactly - the three parts sum to the change by construction, and
 residual is computed at runtime and reported rather than assumed. Across both demo
 portfolios and all 12 recorded windows it is exactly `0.00`.
 
-```bash
-uv run python -m xray_agent investigate "Why is my portfolio down this month?"     --portfolio portfolio.demo_b.csv --mode replay --today 2026-10-26
-```
-
-`--mode replay` serves market data from recorded fixtures, so the demo cannot fail on bad
-wifi. The model's decisions stay live.
 
 ## Architecture
 
@@ -159,25 +156,26 @@ user ──► router (Haiku, structured output, fails safe)
    ┌─────────┼──────────────┬─────────────┐
  advice   analytics        news        education
    │         │              │              │
- canned   Python tools   RSS fetch →    no-tools
- refusal  (exact-unit    sufficiency    answer
- (SEBI    XIRR, beta,    judge → one
-  line)   HHI, overlap,  refetch →
-          Sharpe...)     cited synth
-             │
+ canned   THE            RSS fetch →    no-tools
+ refusal  INVESTIGATOR   sufficiency    answer
+ (SEBI    (the same      judge → one    (one call,
+  line)   loop, below,   refetch →       no loop:
+          6 steps/Rs 2)  cited synth     nothing
+             │                           to cite)
              ▼
    Health Report engine: deterministic section JSONs → 11 matplotlib charts
    → Haiku insights GUARDED MECHANICALLY (imperative regex + number-honesty
    check: every numeral must exist in the section JSON) → tiered Excel
 ```
 
-The Investigator sits beside this as its own bounded loop:
+That analytics branch, and the CLI, are the same bounded loop — one tool loop in the repo,
+differing only in budget (CLI 12 steps / ₹10 / 120s; chat 6 / ₹2 / 45s):
 
 ```
 question ─► ROUTER GATE ──advice──► canned refusal      (REFUSED, 0 tools)
                  │
                  ▼
-     ┌──── while budget remains (12 steps / Rs 10 / 120s) ────┐
+     ┌──── while budget remains (CLI 12 / Rs 10 / 120s) ──────┐
      │  update_plan      model states and revises its plan    │
      │  domain tool      memoised, retried, recorded as E_n   │
      │  record_finding   VERIFIED or rejected with a reason   │
@@ -194,9 +192,29 @@ Clean-architecture layering (`domain` / `application` / `ports` / `adapters`) is
 the whole loop run against a scripted model and canned tools: **260 hermetic tests, no
 network, no API key.**
 
-SQLite logs every query's tokens, cost and latency, and every investigation's outcome,
+SQLite logs every query's tokens, cost and latency, and every CLI investigation's outcome,
 steps, cost and verified-findings ratio. FastAPI serves it; Streamlit fronts it; the API
 key never leaves the server.
+
+### Watching it think
+
+Three tracers behind one port, chosen with `--trace`:
+
+| | | |
+|---|---|---|
+| `console` | **default, no setup** | the boxed trace: plan, each tool call with its evidence ID and latency, every verifier accept/reject, and the budget as it is spent |
+| `none` | | no-op |
+| `langfuse` | `uv sync --extra tracing` + keys | the same run as spans — `investigation` (agent) → `llm.generate` (tokens, cost, prompt, completion), `tool.*` (evidence ID, cache hit, retries), `verify.finding` (guardrail) — plus run-level scores |
+
+**Nothing of yours leaves by default.** The Langfuse adapter sends tool *names*, evidence
+IDs, statuses, latencies, costs and outcomes; the holding names, the rupee amounts, the
+question and the model's claims are replaced by a placeholder unless you set
+`XRAY_TRACE_CONTENT=1`. It is a placeholder rather than a partial mask on purpose — a
+"masked" amount is often recoverable from a percentage and a total. Redaction lives in the
+adapter, not the core: the loop hands over real values and each adapter decides what is
+safe to export, which is why the console tracer can show you everything while the SaaS one
+shows almost nothing. There are tests asserting a run containing "Reliance Industries" and
+`8100.25` exports neither.
 
 ## Evals (the centerpiece)
 
@@ -312,15 +330,22 @@ built.
 - **The query log holds no portfolio content**: one row per query with category, tool
   *names*, model names, token counts, cost and latency — no message text, no holdings, no
   amounts. There is a test asserting the table has no column that could carry any.
-- **Several portfolios, none of them stored**: the multi-portfolio switcher keeps each one
-  in Streamlit's session state, in the browser. Nothing is written server-side, which is
-  why they are lost on refresh — a deliberate trade, since a public demo has no auth and
-  persisting strangers' portfolios to save them a re-upload is a bad bargain.
+- **Several portfolios, none of them stored**: add them from the sidebar — the sample, or
+  your own CSV — and switch between them from the row above the page title. Every page
+  follows the selected one, the analyst included. Each is kept in Streamlit's session
+  state, in the browser; nothing is written server-side, which is why they are lost on
+  refresh — a deliberate trade, since a public demo has no auth and persisting strangers'
+  portfolios to save them a re-upload is a bad bargain. Switching clears the chat thread,
+  because figures from one book have no business sitting under another's heading.
 - **Rate limiting keeps IP addresses for one day**: the counter needs only today's row, so
   older ones are deleted on write rather than accumulating.
 - The Investigator's SQLite tables (`investigation_runs`) *do* record the question and the
-  summary verbatim. **No deployed endpoint writes them** — the agent is CLI-only today, and
-  exposing it would mean changing that first.
+  summary verbatim, and **no deployed endpoint writes them.** That is now a decision rather
+  than a side effect of where the agent runs: the chat's analytics branch *is* the
+  Investigator, and it is constructed with the default `NoopRunStore` precisely so a
+  deployed turn leaves no row. The CLI passes `SqliteRunStore` and keeps its history,
+  because the CLI is not a public endpoint. Exposing a dedicated `/investigate` route
+  would mean making that choice explicitly rather than inheriting it.
 - **Key server-side**: the frontend knows one secret — the backend URL.
 
 ## Known limitations (honest)
@@ -373,7 +398,7 @@ built.
 4. **CAS PDF ingestion.** Broker CSV statements now import directly (equity and MF); a
    consolidated CAS PDF would cover every AMC in one upload. Also full-holdings overlap
    via AMC factsheet parsing, so overlap stops being top-10-only.
-5. **A sandboxed `run_analysis(python_code)` tool** — lifts the ceiling from 13 fixed
+5. **A sandboxed `run_analysis(python_code)` tool** — lifts the ceiling from 17 fixed
    tools to anything expressible in pandas, without breaking the no-arithmetic rule:
    the model writes code, Python still computes.
 
