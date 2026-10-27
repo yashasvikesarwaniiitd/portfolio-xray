@@ -454,6 +454,28 @@ async def portfolios_update(pid: str, request: Request):
     return {"updated": True}
 
 
+@app.post("/convert")
+async def convert_workbook(file: UploadFile):
+    """Turn an uploaded Excel workbook into portfolio text, ready for /analysis or /merge.
+
+    Everything downstream speaks CSV text, so Excel support is a translation at the door
+    rather than a second path through analysis, merging and saving. Stateless, like /merge:
+    nothing is stored and no market data is fetched.
+
+    Reads at most the limit plus one byte. Streamlit allows 200 MB uploads and this runs on
+    a free-tier instance, so reading the whole body first would let one upload take the
+    server down; the extra byte is what tells "exactly at the limit" from "over it".
+    """
+    import excel_import
+    data = await file.read(excel_import.MAX_BYTES + 1)
+    try:
+        text, report = excel_import.workbook_to_text(data)
+        _quiet_unlink(_csv_to_temp(text))       # the engine must be able to read the result
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    return {"csv_text": text, "report": report, "summary": excel_import.describe(report)}
+
+
 @app.post("/merge")
 async def merge_portfolio(request: Request):
     """Fold an uploaded file into an existing portfolio's text, without double-counting.

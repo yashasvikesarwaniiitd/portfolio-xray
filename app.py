@@ -794,6 +794,38 @@ def load_analysis(csv_text: str | None, label: str, name: str | None = None,
     return False
 
 
+def read_upload(f) -> tuple[str | None, str | None, str | None]:
+    """(portfolio text, note, error) for an uploaded CSV or Excel file.
+
+    An Excel workbook is converted by the server into the same text a CSV export would be,
+    so everything after this point - merging, saving, analysis, the chat - is unchanged and
+    does not know the difference. The conversion happens server-side because the frontend
+    must not import backend modules, and it is cached per file: this runs on every rerun of
+    the dialog, and re-uploading a workbook to convert it again on each click would be a
+    network round trip per keystroke in the name box.
+
+    A failure to reach the server is not cached, so the next rerun retries it.
+    """
+    if not f.name.lower().endswith((".xlsx", ".xlsm")):
+        return f.getvalue().decode("utf-8-sig", "replace"), None, None
+    sig = (f.name, f.size)
+    cache = ss.get("xl_cache") or {}
+    if sig in cache:
+        return cache[sig]
+    with st.spinner("Reading the workbook…"):
+        code, data = call_json("POST", "/convert",
+                               files={"file": (f.name, f.getvalue(),
+                                               "application/octet-stream")})
+    if code == 200 and "csv_text" in data:
+        out = (data["csv_text"], data.get("summary"), None)
+    else:
+        out = (None, None, UNREACHABLE if code == 0 else
+               data.get("error", "Could not read that workbook."))
+    if code != 0:
+        ss.xl_cache = {**cache, sig: out}
+    return out
+
+
 def persist(key: str) -> None:
     """Keep the portfolio called `key` in the database, so a refresh does not lose it.
 
@@ -901,13 +933,19 @@ def upload_dialog() -> None:
                    + (" The sample cannot be added to, so it is always a new portfolio."
                       if active and not can_update else ""))
 
-    f = st.file_uploader("CSV file", type=["csv"], key="dlg_file")
+    f = st.file_uploader("CSV or Excel file", type=["csv", "xlsx", "xlsm"], key="dlg_file")
     if f is None:
         ss.dlg_sig = None
-        st.caption("A Groww equity or mutual-fund transaction report, or the SIP sheet. "
-                   "Max 200 MB.")
+        st.caption("A Groww equity or mutual-fund transaction report, or the SIP sheet, as "
+                   "CSV or Excel (.xlsx). An Excel workbook can have several sheets; every "
+                   "one that looks like a portfolio is read.")
         return
-    text = f.getvalue().decode("utf-8-sig", "replace")
+    text, note, err = read_upload(f)
+    if err:
+        st.error(err)
+        return
+    if note:
+        st.caption(note)
 
     if updating:
         sig = (f.name, f.size, active, len(ss.portfolios[active]["csv_text"] or ""))
@@ -1040,7 +1078,7 @@ with st.sidebar:
                  icon=":material/upload:"):
         upload_dialog()
     st.markdown('<div class="rail-cap">A Groww equity or mutual-fund transaction report, '
-                'or the SIP sheet.</div>', unsafe_allow_html=True)
+                'or the SIP sheet — CSV or Excel.</div>', unsafe_allow_html=True)
 
     # --- saved portfolios -----------------------------------------------------------
     # Shown only once saving is known to work - a key exists, or something has been saved.
@@ -1592,20 +1630,25 @@ def page_holdings() -> None:
             ss.page = "analysis" if ss.analysis else "ask"
             st.rerun()
 
-    with st.expander("Paste or upload a full CSV instead (unlocks tier L2)"):
+    with st.expander("Paste or upload a full CSV or Excel file instead (unlocks tier L2)"):
         st.markdown('<div style="font-size:13px;color:var(--ink2);line-height:1.6">'
                     'Same columns as the template, plus one column per month named like '
                     '<span class="mono">Mar\'25</span>, <span class="mono">April\'25</span>'
                     ' … holding that month\'s SIP amount. That history is what lets units '
                     'be reconstructed exactly (units = amount ÷ NAV on that date) instead '
                     'of estimated.</div>', unsafe_allow_html=True)
-        up = st.file_uploader("CSV file", type=["csv"], key="up")
+        up = st.file_uploader("CSV or Excel file", type=["csv", "xlsx", "xlsm"], key="up")
         pasted = st.text_area("…or paste CSV text", height=120, key="paste")
         if st.button("Analyse this CSV"):
-            payload = (up.getvalue().decode("utf-8", "replace") if up
-                       else (pasted or "").strip())
-            if not payload:
-                st.warning("Upload or paste a CSV first.")
+            payload, up_err = None, None
+            if up:
+                payload, _note, up_err = read_upload(up)
+            else:
+                payload = (pasted or "").strip()
+            if up_err:
+                st.error(up_err)
+            elif not payload:
+                st.warning("Upload a file or paste a CSV first.")
             else:
                 if load_analysis(payload, "Your portfolio", name="Pasted CSV"):
                     persist(ss.active)

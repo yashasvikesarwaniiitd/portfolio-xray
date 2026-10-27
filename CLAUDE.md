@@ -17,7 +17,11 @@ via deterministic Python tools, and explains results with citations.
 ## Portfolio ingestion
 Three input formats, detected from file contents (`agent.read_portfolio` dispatches):
 broker equity order statements, mutual fund statements, and the original monthly SIP
-sheet. A statement is preferred — units are read from real fills rather than
+sheet. Each can arrive as CSV or as an Excel workbook (.xlsx/.xlsm): `excel_import`
+turns a workbook into the same text a CSV export would be, so nothing downstream knows
+the difference. Every sheet that parses as a portfolio becomes a part; the rest are
+listed as skipped, never silently dropped. Excel turns the header `Mar'25` into a real
+date, so on a SIP header row dates are written back as month labels. A statement is preferred — units are read from real fills rather than
 reconstructed, and it can express SELLS, which the SIP sheet cannot.
 - Non-executed orders (cancelled/rejected/failed) are excluded and counted. An
   unrecognised status is KEPT and surfaced — dropping a real trade silently is worse.

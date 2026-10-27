@@ -78,3 +78,51 @@ def test_update_with_a_wrong_key_or_dead_database_is_a_404_not_a_crash(monkeypat
     monkeypatch.setattr("storage.CONNECT_TIMEOUT", 1)
     r = client.put("/portfolios/abc", json={"name": "n"}, headers={"X-Owner-Key": "k"})
     assert r.status_code == 404
+
+
+# --- Excel -----------------------------------------------------------------------------------
+
+def _xlsx(rows, title="Orders"):
+    import io
+    from openpyxl import Workbook
+    wb = Workbook()
+    wb.active.title = title
+    for r in rows:
+        wb.active.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+XL_ROWS = [["Date", "Symbol", "Stock name", "Type", "Quantity", "Price", "Order status"],
+           ["2026-01-05", "INFY", "Infosys", "BUY", 10, 1500, "Executed"]]
+
+
+def test_convert_turns_a_workbook_into_text_the_other_endpoints_accept():
+    r = client.post("/convert", files={"file": ("orders.xlsx", _xlsx(XL_ROWS),
+                                                "application/octet-stream")})
+    assert r.status_code == 200
+    body = r.json()
+    assert "Infosys" in body["csv_text"] and "“Orders” (1 rows)" in body["summary"]
+    # ...and the converted text merges like any CSV would.
+    m = client.post("/merge", json={"existing_csv": "", "incoming_csv": body["csv_text"]})
+    assert m.status_code == 200 and m.json()["report"]["transactions_added"] == 1
+
+
+def test_convert_refuses_a_non_workbook_with_a_reason():
+    r = client.post("/convert", files={"file": ("orders.xlsx", b"a,b\n1,2\n", "text/csv")})
+    assert r.status_code == 400 and "not an .xlsx" in r.json()["error"]
+
+
+def test_convert_refuses_a_workbook_with_no_portfolio_in_it():
+    r = client.post("/convert", files={"file": ("n.xlsx", _xlsx([["hello"], ["world"]], "Notes"),
+                                                "application/octet-stream")})
+    assert r.status_code == 400 and "Sheets seen" in r.json()["error"]
+
+
+def test_convert_never_reads_more_than_the_limit(monkeypatch):
+    import excel_import
+    monkeypatch.setattr(excel_import, "MAX_BYTES", 100)
+    r = client.post("/convert", files={"file": ("big.xlsx", b"PK" + b"x" * 5000,
+                                               "application/octet-stream")})
+    assert r.status_code == 400 and "limit" in r.json()["error"]

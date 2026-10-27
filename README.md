@@ -343,6 +343,15 @@ built.
   selected one, the analyst included. With saving on they reopen after a refresh (below);
   without it they live in session state only. Switching clears the chat thread, because
   figures from one book have no business sitting under another's heading.
+- **CSV or Excel.** Both upload paths take `.csv`, `.xlsx` and `.xlsm`. A workbook is
+  converted server-side into the text a CSV export would have been, so merging, saving,
+  analysis and the chat are unchanged. Each sheet is judged on its own: a cover or summary
+  tab is skipped *with a reason shown*, and a workbook with stocks on one tab and funds on
+  another becomes one portfolio with two sections. Excel's habit of turning the SIP header
+  `Mar'25` into a date is undone on read, because otherwise the sheet would parse as having
+  no months and reconstruct nothing while looking identical on screen. Bounded to 5 MB, 30
+  sheets and 20,000 rows each, read in streaming mode; the legacy `.xls` format is refused
+  with how to convert it. See `excel_import.py`.
 - **Adding to a portfolio without double-counting it.** Upload opens a dialog with two
   intents. *Update* merges the file into the open portfolio; *Add as a new portfolio* asks
   for a name instead of inheriting the export's filename. Every row has a unique key (a
