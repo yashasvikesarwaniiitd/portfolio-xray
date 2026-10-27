@@ -39,7 +39,38 @@ def _dsn() -> str:
     configuration bug can take: correct in production, silently off on the machine where
     you would notice.
     """
-    return os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL") or ""
+    return normalise_dsn(os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL")
+                         or "")
+
+
+def normalise_dsn(url: str) -> str:
+    """Make a connection string survive a password that was pasted without URL-encoding.
+
+    A URL's password may not contain `@`, `/`, `#`, `?` or `:` unescaped, but people paste the
+    string Supabase shows with the password typed straight in. The FIRST `@` then ends the
+    userinfo early, so the driver reads the rest of the password plus the real host as the host
+    name and fails with "could not translate host name" - which looks like a network problem
+    and is not. Measured earlier in this project: `...:Pass@word@aws-0-....pooler...` failed
+    with `failed to resolve host 'word@aws-0-...'`.
+
+    The real host is everything after the LAST `@`, so split there, and percent-encode the
+    password. Already-encoded input is decoded first and re-encoded, so a correct string comes
+    out unchanged and nothing is ever double-encoded.
+    """
+    from urllib.parse import quote, unquote
+    for scheme in ("postgresql://", "postgres://"):
+        if not url.startswith(scheme):
+            continue
+        rest = url[len(scheme):]
+        at = rest.rfind("@")
+        if at < 0:
+            return url
+        userinfo, hostpart = rest[:at], rest[at + 1:]
+        user, colon, password = userinfo.partition(":")
+        if not colon:
+            return url
+        return f"{scheme}{quote(unquote(user), safe='.')}:{quote(unquote(password), safe='')}@{hostpart}"
+    return url
 
 # A portfolio is ~1KB of CSV. The cap is three orders of magnitude above that: big enough
 # for a long transaction history, small enough that one paste cannot fill the table.

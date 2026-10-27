@@ -185,3 +185,50 @@ def test_diagnose_names_the_kind_of_failure_without_leaking_the_message(monkeypa
 def test_diagnose_reports_a_working_database_as_reachable():
     assert storage.init_db()
     assert storage.diagnose() == {"reachable": True, "problem": None}
+
+
+# --- a password pasted without URL-encoding ----------------------------------------------------
+
+HOST = "aws-0-ap-southeast-1.pooler.supabase.com"
+
+
+def parsed(url):
+    """What the DRIVER makes of a string - the only judge that matters."""
+    from psycopg.conninfo import conninfo_to_dict
+    return conninfo_to_dict(storage.normalise_dsn(url))
+
+
+@pytest.mark.parametrize("password", ["plain123", "Pass@word", "a/b#c?d", "p@ss@w0rd@x", "co:lon"])
+def test_a_password_with_reserved_characters_still_reaches_the_right_host(password):
+    """The live failure: the first @ ended the userinfo early, the driver read the tail of the
+    password plus the real host as the HOST, and reported "could not translate host name" -
+    which looks like a network fault and is not."""
+    d = parsed(f"postgresql://postgres.abcdef:{password}@{HOST}:5432/postgres")
+    assert d["host"] == HOST and d["port"] == "5432" and d["dbname"] == "postgres"
+    assert d["user"] == "postgres.abcdef"
+    assert d["password"] == password, "the password must arrive exactly as typed"
+
+
+def test_the_unfixed_string_really_does_fail_so_this_test_is_not_vacuous():
+    from psycopg.conninfo import conninfo_to_dict
+    d = conninfo_to_dict(f"postgresql://postgres.abcdef:Pass@word@{HOST}:5432/postgres")
+    assert d["host"] != HOST, "without normalising, the host is misread"
+
+
+def test_a_correctly_encoded_string_comes_out_unchanged_and_is_never_double_encoded():
+    good = f"postgresql://postgres.abcdef:Pass%40word@{HOST}:5432/postgres"
+    assert storage.normalise_dsn(good) == good
+    assert parsed(good)["password"] == "Pass@word"
+    assert storage.normalise_dsn(storage.normalise_dsn(good)) == good
+
+
+def test_strings_it_does_not_understand_are_returned_untouched():
+    for odd in ("", "not a url", "postgresql://hostonly/db", f"postgresql://user@{HOST}/db",
+                "mysql://u:p@h/d"):
+        assert storage.normalise_dsn(odd) == odd
+
+
+def test_the_connection_uses_the_normalised_string(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_DB_URL", f"postgresql://u:Pa@ss@{HOST}:5432/postgres")
+    assert storage._dsn() == f"postgresql://u:Pa%40ss@{HOST}:5432/postgres"
