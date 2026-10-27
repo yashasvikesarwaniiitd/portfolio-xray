@@ -890,7 +890,11 @@ def page_analysis() -> None:
         f'line is point-to-point.</div></div>')
 
     effn = div.get("effective_holdings")
+    # holdings_count is what the figure is computed OVER, which is not always what you
+    # hold: a holding with no price carries no weight, so counting it here would claim a
+    # spread across something that never entered the sum.
     total_h = div.get("holdings_count") or a["holdings_total"]
+    skipped = div.get("unweighted_unpriced") or 0
     filled = int(round(effn or 0))
     pips = "".join(f'<i class="{"on" if i < filled else ""}"></i>' for i in range(total_h))
     k_spread = (
@@ -901,7 +905,10 @@ def page_analysis() -> None:
         f'{effn if effn is not None else "—"} independent bets</div>'
         f'<div class="pips">{pips}</div>'
         f'<div class="k-foot">1 ÷ HHI. Overlapping funds and big positions shrink '
-        f'this below your holding count.</div></div>')
+        f'this below your holding count.'
+        + (f' {skipped} holding(s) with no price carry no weight and are not counted '
+           f'here.' if skipped else "")
+        + '</div></div>')
 
     wc = cost.get("weighted_cost_pct_of_covered")
     covered = len(cost.get("expense_ratios") or [])

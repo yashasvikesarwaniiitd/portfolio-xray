@@ -267,3 +267,82 @@ def test_locked_tier_report_from_weights_only_csv(tmp_path):
     locked_text = " ".join(str(c.value) for row in wb["6 · Risk Profile"].iter_rows()
                            for c in row if c.value)
     assert "LOCKED" in locked_text and "L2" in locked_text
+
+
+# --- an unpriced holding is not a diversifying bet -----------------------------------------
+
+def _holding(name, source, invested):
+    return {"name": name, "symbol": "" if source == "manual" else f"{name}.NS",
+            "source": source, "type": "Basket" if source == "manual" else "Share",
+            "market": "India", "risk": "Med", "total_invested": invested}
+
+
+def _fake_prices(monkeypatch, values: dict):
+    """Price by name; anything missing comes back unavailable, as a dead feed would."""
+    import agent
+
+    def fake(h, *a, **kw):
+        v = values.get(h["name"])
+        if v is None:
+            return {"status": "unavailable", "reason": "no live-price source"}
+        return {"status": "priced", "current_value": v}
+    monkeypatch.setattr(agent, "reconstruct_holding", fake)
+
+
+def test_an_unpriced_holding_carries_no_weight_at_l2(monkeypatch):
+    """It used to be weighted at its INVESTED amount while everything beside it was
+    weighted at today's VALUE — two different quantities summed as if they were one.
+
+    Three things went wrong at once. The bases were mixed. The weights divided by a total
+    the user is never shown, because the headline "what it's worth today" excludes
+    unpriced holdings while this included them. And it disagreed with
+    agent.fetch_concentration, which feeds the same metric priced rows only — so the
+    dashboard and the chat reported different effective-bet counts for one portfolio.
+
+    The row is still CARRIED, with priced=False, so the holdings table and the "could not
+    be valued" card report it exactly as before. It just does not claim a share.
+    """
+    from report import data as rd
+    _fake_prices(monkeypatch, {"Alpha": 60000.0, "Beta": 40000.0})
+    holdings = [_holding("Alpha", "yfinance", 50000), _holding("Beta", "yfinance", 50000),
+                _holding("Basket", "manual", 25000)]
+
+    rows = rd.holdings_with_weights(holdings, "L2")
+    by = {r["name"]: r for r in rows}
+    assert len(rows) == 3, "the unpriced holding must still be reported"
+    assert by["Basket"]["priced"] is False
+    assert by["Basket"]["weight_pct"] == 0.0, "an unvalued holding cannot hold a share"
+    # 60k and 40k against a 100k base, NOT a 125k base that includes the basket's cost
+    assert by["Alpha"]["weight_pct"] == 60.0
+    assert by["Beta"]["weight_pct"] == 40.0
+
+
+def test_effective_bets_are_counted_over_what_was_actually_weighted(monkeypatch):
+    """"4.7 of 6" when only 5 rows entered the sum claims a spread across a holding that
+    was never in it. holdings_count is the base of the figure; holdings_held is the book."""
+    from report import data as rd
+    _fake_prices(monkeypatch, {"Alpha": 50000.0, "Beta": 50000.0})
+    rows = rd.holdings_with_weights(
+        [_holding("Alpha", "yfinance", 50000), _holding("Beta", "yfinance", 50000),
+         _holding("Basket", "manual", 25000)], "L2")
+    div = rd.section_diversification(rows, 0.0)
+
+    assert div["holdings_count"] == 2, "the figure is over the two that were weighted"
+    assert div["holdings_held"] == 3, "the book still has three lines in it"
+    assert div["unweighted_unpriced"] == 1
+    # two equal weights -> HHI 0.5 -> exactly 2 effective bets, not 3 and not 2.4
+    assert div["effective_holdings"] == 2.0
+
+
+def test_l1_still_weights_everything_by_invested_amount(monkeypatch):
+    """The invested-amount fallback is the L1 BASIS, not a patch for a failed price. At L1
+    there are no prices at all, so every row uses invested and nothing is dropped —
+    narrowing the fallback to L2-only must not have touched this."""
+    from report import data as rd
+    _fake_prices(monkeypatch, {})          # no price would be available even if asked
+    rows = rd.holdings_with_weights(
+        [_holding("Alpha", "yfinance", 75000), _holding("Basket", "manual", 25000)], "L1")
+    by = {r["name"]: r for r in rows}
+    assert by["Alpha"]["weight_pct"] == 75.0
+    assert by["Basket"]["weight_pct"] == 25.0, "at L1 an unpriceable line still counts"
+    assert all(r["priced"] for r in rows)

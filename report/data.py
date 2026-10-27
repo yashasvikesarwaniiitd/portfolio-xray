@@ -120,7 +120,27 @@ def fetch_meta(symbol: str, cache: dict) -> dict:
 def holdings_with_weights(holdings: list[dict], level: str) -> list[dict]:
     """Attach a weight_pct to each holding. L2: weight by reconstructed current value;
     L1: weight by amount invested (documented in Methodology). Unpriced/zero rows keep
-    weight 0 and are reported, never silently dropped."""
+    weight 0 and are reported, never silently dropped.
+
+    That last sentence was not true at L2 until now. The invested-amount fallback below is
+    the L1 basis — at L1 there are no prices at all, so invested IS the measure and every
+    row uses it. At L2 it was also firing for rows that FAILED to price, which did three
+    things the rest of the app does not do:
+
+      * it mixed bases. A basket sat at its cost while everything beside it sat at today's
+        value, and the two were compared as if they were the same quantity.
+      * it weighted against a total nobody sees. The dashboard headlines "what it's worth
+        today" from the snapshot, which excludes unpriced holdings — Rs 52,995 on the
+        sample — while these weights divided by Rs 57,996. Every percentage on the page
+        was a share of a number shown nowhere.
+      * it disagreed with the other path. agent.fetch_concentration feeds the metric
+        priced rows only, so the chat said 3.42 effective bets where the dashboard said
+        3.6 for the same book, and a reader comparing them had no way to tell which.
+
+    The fallback is now scoped to the level it was written for. An unpriced holding at L2
+    keeps weight 0 and is still carried in `rows` with priced=False, so the holdings table
+    and the "could not be valued" card report it exactly as before.
+    """
     rows = []
     for h in holdings:
         base = {"name": h["name"], "symbol": h["symbol"], "source": h["source"],
@@ -131,9 +151,9 @@ def holdings_with_weights(holdings: list[dict], level: str) -> list[dict]:
             if r.get("status") == "priced":
                 base["value"] = r["current_value"]
                 base["priced"] = True
-        if not base["priced"] and h["total_invested"] > 0:
-            base["value"] = h["total_invested"]  # honest fallback: invested amount
-            base["priced"] = level != "L2"
+        elif h["total_invested"] > 0:
+            base["value"] = h["total_invested"]  # L1 basis: invested amount
+            base["priced"] = True
         rows.append(base)
     total = sum(r["value"] for r in rows)
     for r in rows:
@@ -219,7 +239,12 @@ def section_diversification(rows: list[dict], overlap_penalty: float) -> dict:
         [v for _, v in _group_pcts(rows, lambda r: r["market"] or "Unknown")]), 3)
     score = metrics.diversification_score(eff, ac_spread, geo_spread, overlap_penalty)
     return {
-        "holdings_count": len(rows), "hhi": hhi, "effective_holdings": eff,
+        # The count the effective-bets figure is OVER, not the count of rows held. They
+        # differ whenever something could not be priced, and "4.7 of 6" when only 5 rows
+        # entered the maths claims a spread across a holding that was never in it.
+        "holdings_count": len(weights), "holdings_held": len(rows),
+        "unweighted_unpriced": sum(1 for r in rows if r["weight_pct"] <= 0),
+        "hhi": hhi, "effective_holdings": eff,
         "tiny_positions_under_half_pct": sum(1 for r in rows if 0 < r["weight_pct"] < 0.5),
         "asset_class_spread": ac_spread, "geo_spread": geo_spread,
         "overlap_penalty": round(overlap_penalty, 3),

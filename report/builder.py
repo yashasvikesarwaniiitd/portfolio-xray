@@ -201,7 +201,10 @@ def _sheet_diversification(ws, sec, ch, ai):
     r = good_looks(ws, r, "A balanced shape touches every axis. Shapes with a zero axis have "
                           "a blind spot that shows up in drawdowns.")
     t = table(ws, r, ["Metric", "Value", "Plain English"], [
-        ("Actual holdings", sec["holdings_count"], "lines in your portfolio"),
+        ("Actual holdings", sec.get("holdings_held", sec["holdings_count"]),
+         "lines in your portfolio"),
+        ("Weighted holdings", sec["holdings_count"],
+         "lines the figures below are computed over"),
         ("HHI", sec["hhi"], "concentration index (lower = more spread)"),
         ("Effective holdings", sec["effective_holdings"],
          "how many independent bets they act like"),
@@ -377,7 +380,8 @@ def _exec_summary(wb, bundle, ch, exec_bullets):
                "four most important findings.")
     div = bundle["sections"].get("diversification", {})
     risk = bundle["sections"].get("risk", {})
-    kpis = [("Holdings", bundle["holdings_count"], "things you own"),
+    kpis = [("Holdings", bundle.get("holdings_held") or bundle["holdings_count"],
+            "things you own"),
             ("Effective bets", div.get("effective_holdings", "n/a"),
              "what they behave like*"),
             ("Portfolio beta", risk.get("portfolio_beta_est", "n/a"), "swing vs market"),
@@ -520,6 +524,7 @@ def _cross_context(sections: dict) -> dict:
         "diversification_score": div.get("diversification_score"),
         "effective_holdings": div.get("effective_holdings"),
         "holdings_count": div.get("holdings_count"),
+        "holdings_held": div.get("holdings_held"),
         "max_overlap_pct": sections.get("overlap", {}).get("max_overlap_pct"),
         "top_holding_weight_pct": conc.get("max_single_weight_pct"),
         "portfolio_beta_est": sections.get("risk", {}).get("portfolio_beta_est"),
