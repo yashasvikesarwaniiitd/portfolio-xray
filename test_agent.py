@@ -170,3 +170,14 @@ def test_get_nav_reads_a_real_nav_rather_than_a_fragment_of_the_scheme_name():
     # the qualifier belongs IN the name, not in the fields either side of it
     assert "Direct" in out["scheme_name"]
     assert len(out["as_of"]) == 10 and out["as_of"][4] == "-"
+
+
+def test_the_system_prompt_asks_for_plain_language_without_inviting_arithmetic():
+    """The chat answered 'How concentrated am I?' with the Herfindahl index, an unexplained
+    0.0597 and nine other figures. The prompt now carries a writing guide; it must keep the
+    rules that matter more than readability: figures are the tool's own, and no advice."""
+    from agent import SYSTEM as s
+    assert "HOW TO WRITE" in s and "Avoid jargon" in s
+    assert "never a number you worked out yourself" in s
+    assert "Describe, never suggest" in s
+    assert "never give buy/sell/hold advice".lower() in s.lower()
