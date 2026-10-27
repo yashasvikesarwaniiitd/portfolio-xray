@@ -166,6 +166,43 @@ def load(owner_key: str, pid: str) -> dict | None:
         return None
 
 
+def update(owner_key: str, pid: str, name: str | None = None,
+           csv_text: str | None = None) -> bool:
+    """Change a saved portfolio in place - its contents, its name, or both.
+
+    This is what "add to my portfolio" and "rename" need. Without it the only way to extend
+    a saved portfolio was to save a new row and delete the old one, which lands the portfolio
+    at the back of the list with a new id and costs a second round trip to another continent.
+
+    The owner hash is in the WHERE clause, as everywhere else: a wrong key updates nothing
+    and reports False. Expiry restarts on every update, because a portfolio someone is
+    still adding to is plainly not abandoned.
+    """
+    if not (configured() and owner_key and pid) or (name is None and csv_text is None):
+        return False
+    if csv_text is not None:
+        if not csv_text.strip() or len(csv_text.encode("utf-8")) > MAX_CSV_BYTES:
+            return False
+    sets, args = [], []
+    if name is not None:
+        sets.append("name = %s")
+        args.append((name or "Portfolio")[:80])
+    if csv_text is not None:
+        sets.append("csv_text = %s")
+        args.append(csv_text)
+    sets += ["last_opened_at = now()", "expires_at = %s"]
+    args.append(datetime.now(timezone.utc) + timedelta(days=TTL_DAYS))
+    try:
+        with _connect() as conn:
+            cur = conn.execute(
+                f"UPDATE saved_portfolio SET {', '.join(sets)} "
+                "WHERE id = %s AND owner_key_hash = %s AND expires_at > now()",
+                (*args, pid, hash_key(owner_key)))
+            return cur.rowcount > 0
+    except Exception:
+        return False
+
+
 def delete(owner_key: str, pid: str) -> bool:
     if not (configured() and owner_key and pid):
         return False

@@ -154,6 +154,7 @@ def resolve_holdings(holdings: list, search_fn=None) -> list:
         h["symbol"] = str(r["fund_code"])
         h["source"] = "mftool"
         h["type"] = h.get("type") or "Mutual Fund"
+        h["market"] = h.get("market") or "India"    # AMFI schemes are Indian by construction
         detail = f"{h['name']} -> AMFI {r['fund_code']} ({r['scheme_name']})"
         if r.get("ambiguous"):
             detail += ("  [AMBIGUOUS: several variants scored equally; check the plan and "

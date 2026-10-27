@@ -174,6 +174,39 @@ def normalise_symbol(symbol: str, name: str = "", exchange: str = "") -> tuple:
     return sym, ""
 
 
+_ETFISH = re.compile(r"(etf|bees|beees|exchange traded)", re.I)
+
+
+def infer_instrument(symbol: str, source: str, name: str = "") -> tuple:
+    """(type, market) for a holding the statement did not classify.
+
+    A SIP sheet states both in its own columns. A broker statement states neither, so every
+    stock imported from one arrived as type "" and market "" - and the engine read that as
+    "Other". Concretely: the allocation chart put a book of NSE shares under "Other", the
+    sector and direct look-through sections (which only accept type == "share") skipped
+    them, and a statement-built portfolio looked smaller and less analysable than the same
+    holdings entered by hand. Nothing failed; the sections just quietly had nothing to say.
+
+    Inferred from what the statement DOES give, with no network: the venue suffix and the
+    price source. ETF is a name heuristic (BeES, ETF) and is only a heuristic - a wrong
+    guess moves a holding between "Share" and "ETF", which changes nothing about its value.
+    """
+    sym = str(symbol or "").strip().upper()
+    if source == "mftool":
+        return "Mutual Fund", "India"
+    if source == "crypto" or sym.endswith("-USD"):
+        return "Crypto", "Global"
+    if not sym and not source:
+        return "", ""
+    etf = bool(_ETFISH.search(name or "")) or sym.endswith("BEES.NS")
+    typ = "ETF" if etf else "Share"
+    if sym.endswith((".NS", ".BO")):
+        return typ, "India"
+    if source == "yfinance":
+        return typ, "US"
+    return "", ""
+
+
 def order_executed(value) -> bool | None:
     """True / False / None when the status is present but not recognised."""
     token = _norm(value)
@@ -316,12 +349,13 @@ def to_holdings(txns: list) -> list:
         group.sort(key=lambda t: t.date)
         symbol, source = normalise_symbol(group[0].symbol, group[0].name)
         symbol = group[0].symbol or symbol      # the suffix was resolved per-row already
+        inferred = infer_instrument(symbol, source, group[0].name)
         gross_buys = sum(t.value for t in group if t.side == BUY)
         holdings.append({
             "name": group[0].name or key,
             "symbol": symbol,
             "source": source,
-            "type": "", "market": "", "risk": "",
+            "type": inferred[0], "market": inferred[1], "risk": "",
             "total_invested": round(gross_buys, 2),
             # Kept so anything still reading `inflows` degrades instead of breaking; the
             # transactions below are the authoritative record.

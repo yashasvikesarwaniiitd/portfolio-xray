@@ -192,12 +192,15 @@ SCHEMAS = [
     {
         "name": "fund_lookthrough",
         "description":
-            "The companies the portfolio actually owns, counted through the funds that "
-            "hold them: for each company, its weight inside each fund times that fund's "
-            "weight in the portfolio. Use this to answer 'how much of X do I really own' "
-            "and to find a single company reached through several funds. Only funds with "
-            "a full disclosed holdings list are included — read portfolio_pct_covered and "
-            "say what share of the book this could see, and quote the as_of date.",
+            "What the whole portfolio is actually made of, one line per company or asset "
+            "with EVERY form it is held in: a company held directly and also inside one or "
+            "more funds is a single line with direct_pct, via_funds_pct, total_pct and a "
+            "forms list. Also returns by_class (equity, debt, cash, gold & silver, crypto, "
+            "hedges...). Use it for 'how much of X do I really own', 'where do I hold X' and "
+            "'what is my real debt/equity split'. Only funds with a full disclosed holdings "
+            "list are opened up; a fund without one, and any ETF, is a single line "
+            "(asset_class says so). Read portfolio_pct_covered and looked_through_pct and "
+            "say how much of the book was opened up, and quote as_of.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {

@@ -728,3 +728,37 @@ def test_stats_survives_a_db_that_only_the_investigator_has_written():
         conn.execute("CREATE TABLE investigation_runs (id INTEGER PRIMARY KEY)")
     assert os.path.exists(f)
     assert logger.summarize(f) == {"queries": 0}
+
+
+# --- classifying holdings a statement does not classify ---------------------------------------
+
+def test_a_statement_stock_is_a_share_not_other():
+    """The allocation chart, the sector section and the direct look-through all filter on
+    type == "share". A statement gave every holding type "" so a book built from one
+    looked like a pile of "Other" and those sections had nothing to say."""
+    h = to_holdings([T(date(2026, 1, 5), BUY, 10, 100, symbol="RELIANCE.NS")])[0]
+    assert (h["type"], h["market"]) == ("Share", "India")
+
+
+def test_a_us_ticker_is_a_us_share_and_a_crypto_pair_is_crypto():
+    from xray_agent.adapters.broker_import import infer_instrument
+    assert infer_instrument("AAPL", "yfinance", "Apple") == ("Share", "US")
+    assert infer_instrument("BTC-USD", "crypto", "Bitcoin") == ("Crypto", "Global")
+
+
+def test_an_amfi_scheme_is_a_mutual_fund_in_india():
+    from xray_agent.adapters.broker_import import infer_instrument
+    assert infer_instrument("122639", "mftool", "Parag Parikh Flexi Cap") == (
+        "Mutual Fund", "India")
+
+
+def test_a_bees_or_etf_name_is_an_etf():
+    from xray_agent.adapters.broker_import import infer_instrument
+    assert infer_instrument("NIFTYBEES.NS", "yfinance", "Nippon Nifty BeES")[0] == "ETF"
+    assert infer_instrument("GOLDBEES.NS", "yfinance", "Nippon Gold ETF")[0] == "ETF"
+    assert infer_instrument("TCS.NS", "yfinance", "TCS")[0] == "Share"
+
+
+def test_an_unresolved_scheme_is_left_unclassified_rather_than_guessed():
+    from xray_agent.adapters.broker_import import infer_instrument
+    assert infer_instrument("", "", "Some Fund Direct Growth") == ("", "")

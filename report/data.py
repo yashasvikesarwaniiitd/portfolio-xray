@@ -93,6 +93,7 @@ def fetch_meta(symbol: str, cache: dict) -> dict:
         meta["market_cap"] = info.get("marketCap")
         meta["currency"] = info.get("currency")
         meta["quote_type"] = info.get("quoteType")
+        meta["long_name"] = info.get("longName")    # lets a ticker be matched to a fund holding by name
         # yfinance reports TER in percent form (e.g. 0.03 for IVV's 0.03%).
         er = info.get("netExpenseRatio", info.get("annualReportExpenseRatio"))
         if er is not None:
@@ -427,56 +428,167 @@ def section_overlap(rows: list[dict], cache: dict) -> dict:
             "note": note}
 
 
-def section_lookthrough(rows: list[dict], cache: dict, top_n: int = 12) -> dict:
-    """The companies you actually own, counting through the funds that hold them.
+_DEBT_WORDS = ("debt", "liquid", "gilt", "bond", "overnight", "money market", "income",
+               "treasury", "credit risk", "duration", "floater", "corporate bond")
 
-    A fund name tells you nothing about what you are exposed to. Three funds can each look
-    like a separate decision and leave you with one position in the same large cap. This
-    adds up, for every company, the weight it carries inside each fund you hold times that
-    fund's weight in your portfolio — the identity metrics.lookthrough_exposure computes
-    for a single stock, applied across the whole book.
+# What each kind of disclosed instrument is, for the class summary. Equity-like kinds are
+# handled separately because they become per-company rows rather than one aggregate.
+_KIND_CLASS = {"DEBT": "Debt", "CASH": "Cash & equivalents",
+               "DERIVATIVE": "Hedges (short futures)", "OTHER": "Other"}
 
-    Funds without a full disclosure are EXCLUDED, not treated as holding nothing, and the
-    share of the portfolio this could see is reported alongside. A look-through covering
-    40% of a book is a useful answer; one that silently presents itself as covering all of
-    it is a wrong one.
+
+def _plain_class(row: dict) -> str:
+    """The asset class of a holding we cannot see inside. Name-based, like asset_class()."""
+    name = (row["name"] or "").lower()
+    typ = (row["type"] or "").lower()
+    if "gold" in name or "silver" in name:
+        return "Gold & Silver"
+    if row["source"] == "crypto" or "crypto" in typ:
+        return "Crypto"
+    if typ == "share":
+        return "Equity"
+    if any(w in name for w in _DEBT_WORDS) or "debt" in typ:
+        return "Debt"
+    if typ == "etf":
+        return "ETF (not looked through)"
+    if typ == "mutual fund":
+        return "Fund (holdings not disclosed)"
+    return "Other"
+
+
+def section_lookthrough(rows: list[dict], cache: dict, top_n: int = 15,
+                        keep: int = 400) -> dict:
+    """What the portfolio is really made of, counting every route to the same thing.
+
+    One line per underlying thing, with every FORM it is held in. A company can be held
+    directly, inside a mutual fund, inside two funds, or all three; the useful number is the
+    total, and the useful detail is the split. So HDFC Bank held as a share AND inside a fund
+    is one row that says "Direct 1.9% + via Parag Parikh 1.9% = 3.8%", rather than two rows
+    in two sections that a reader has to add up by eye.
+
+    Across asset classes, not just stocks. Funds in the snapshot are opened up: their equity
+    holdings become company rows, and their debt, cash and hedge positions become class rows,
+    so a "flexi cap" that is 30% arbitrage and T-bills shows as exactly that. Everything else
+    is one line carrying its own class - a gold ETF is Gold & Silver, a debt fund is Debt,
+    a crypto pair is Crypto - so the rows always add up to the whole portfolio.
+
+    What it will NOT do is pretend. A fund with no disclosure is one line labelled as
+    undisclosed rather than being treated as holding nothing, and the share of the book that
+    was actually opened up is reported alongside. The joins are conservative (see
+    fund_holdings.resolve_isin): an unmatched direct stock stays its own row. ETFs are not
+    opened up yet - they appear as a single line.
     """
-    fund_rows = _fund_rows(rows)
-    exposure: dict = {}
-    covered, seen_funds, as_of = 0.0, [], set()
-    for r in fund_rows:
-        f = fund_holdings.match(r["name"])
-        if not (f and f.get("status") == "OK"):
+    index = fund_holdings.company_index()
+    out: dict = {}          # key -> exposure row
+
+    def add(key, name, isin, klass, amount, form, via=None, pct_in_fund=None):
+        e = out.setdefault(key, {"key": key, "name": name, "isin": isin,
+                                 "asset_class": klass, "total_pct": 0.0,
+                                 "direct_pct": 0.0, "via_funds_pct": 0.0, "forms": []})
+        e["total_pct"] += amount
+        if form == "Direct":
+            e["direct_pct"] += amount
+        elif form == "Via fund":
+            e["via_funds_pct"] += amount
+        # Any other form is a line that stands for itself (an undisclosed fund, an ETF).
+        e["forms"].append({"form": form, "via": via,
+                           "pct_of_portfolio": round(amount, 3),
+                           "pct_in_fund": None if pct_in_fund is None
+                           else round(pct_in_fund, 2)})
+
+    seen_funds, direct_pct, looked_through_pct, as_of = [], 0.0, 0.0, set()
+    fund_total = 0
+    for r in rows:
+        w = r["weight_pct"]
+        if w <= 0:
             continue
-        pos = fund_holdings.positions(f)
-        if not pos:
+        typ = (r["type"] or "").lower()
+        is_fund = typ in ("etf", "mutual fund")
+        if is_fund:
+            fund_total += 1
+
+        f = fund_holdings.match(r["name"]) if typ == "mutual fund" else None
+        if f and f.get("status") == "OK":
+            seen_funds.append(r["name"])
+            looked_through_pct += w
+            as_of.add(f.get("as_of"))
+            for h in f.get("holdings") or []:
+                pct = float(h.get("weight_pct") or 0.0)
+                if not pct:
+                    continue
+                amount = w * pct / 100.0
+                kind = h.get("kind")
+                if kind in fund_holdings.EQUITY_KINDS and h.get("isin"):
+                    add(h["isin"], h.get("name") or h["isin"], h["isin"], "Equity", amount,
+                        "Via fund", via=r["name"], pct_in_fund=pct)
+                elif kind == "MF_UNITS" and h.get("isin"):
+                    add(h["isin"], h.get("name") or h["isin"], h["isin"],
+                        "Fund units", amount, "Via fund", via=r["name"], pct_in_fund=pct)
+                else:
+                    klass = _KIND_CLASS.get(kind, "Other")
+                    add("class:" + klass, {"Debt": "Debt & money-market instruments",
+                                           "Cash & equivalents": "Cash, TREPS & receivables",
+                                           "Hedges (short futures)": "Short futures (hedges)",
+                                           "Other": "Other instruments"}[klass],
+                        None, klass, amount, "Via fund", via=r["name"], pct_in_fund=pct)
             continue
-        names = fund_holdings.names_by_isin(f)
-        covered += r["weight_pct"]
-        seen_funds.append(r["name"])
-        as_of.add(f.get("as_of"))
-        for isin, pct in pos.items():
-            e = exposure.setdefault(isin, {"name": names.get(isin), "pct": 0.0, "via": []})
-            contribution = r["weight_pct"] * pct / 100.0
-            e["pct"] += contribution
-            e["via"].append({"fund": r["name"], "pct_in_fund": round(pct, 2),
-                             "contributes_pct": round(contribution, 3)})
-    if not exposure:
-        return {"error": "no fund in this portfolio has a full disclosed holdings list"}
-    top = sorted(exposure.items(), key=lambda kv: -kv[1]["pct"])[:top_n]
+
+        if typ == "share" and r["source"] == "yfinance":
+            names = [r["name"]]
+            meta = fetch_meta(r["symbol"], cache) if r["symbol"] else {}
+            if meta.get("long_name"):
+                names.insert(0, meta["long_name"])
+            isin = fund_holdings.resolve_isin(names, index)
+            key = isin or "name:" + fund_holdings.norm_company(r["name"])
+            add(key, r["name"], isin, "Equity", w, "Direct")
+            direct_pct += w
+            continue
+
+        # Anything else is one line carrying its own class.
+        klass = _plain_class(r)
+        add("holding:" + (r["symbol"] or r["name"]), r["name"], None, klass, w,
+            "Direct" if not is_fund else "Fund", pct_in_fund=None)
+
+    if not out:
+        return {"error": "nothing in this portfolio could be priced"}
+
+    ranked = sorted(out.values(), key=lambda e: -e["total_pct"])
+    # Keep every row the reader holds directly or in more than one form (those are the
+    # answers to "where do I hold X"), then fill with the largest of the rest.
+    must = [e for e in ranked if e["direct_pct"] > 0 or len(e["forms"]) > 1]
+    rest = [e for e in ranked if e not in must]
+    shown = sorted(must + rest, key=lambda e: -e["total_pct"])[:keep]
+    for e in shown:
+        for k in ("total_pct", "direct_pct", "via_funds_pct"):
+            e[k] = round(e[k], 3)
+        e["held_via"] = len(e["forms"])
+        e["forms"].sort(key=lambda x: -x["pct_of_portfolio"])
+
+    by_class: dict = {}
+    for e in out.values():
+        by_class[e["asset_class"]] = by_class.get(e["asset_class"], 0.0) + e["total_pct"]
+    total_listed = sum(e["total_pct"] for e in out.values())
+    companies = [e for e in out.values() if e["asset_class"] == "Equity"]
     return {
-        "top_exposures": [{"isin": i, "name": e["name"], "total_pct": round(e["pct"], 2),
-                           "held_via": len(e["via"]),
-                           "via": sorted(e["via"], key=lambda v: -v["contributes_pct"])}
-                          for i, e in top],
-        "distinct_companies": len(exposure),
+        "exposures": shown,
+        "top_exposures": [e for e in shown if e["asset_class"] == "Equity"][:top_n],
+        "by_class": [{"asset_class": k, "pct": round(v, 2)}
+                     for k, v in sorted(by_class.items(), key=lambda kv: -kv[1])],
+        "distinct_companies": len(companies),
+        "rows_total": len(out),
         "funds_seen_through": seen_funds,
-        "portfolio_pct_covered": round(covered, 1),
+        "funds_total": fund_total,
+        "portfolio_pct_covered": round(direct_pct + looked_through_pct, 1),
+        "looked_through_pct": round(looked_through_pct, 1),
+        "direct_pct": round(direct_pct, 1),
+        "sum_of_rows_pct": round(total_listed, 2),
         "as_of": sorted(a for a in as_of if a),
-        "note": ("Weights are % of the WHOLE portfolio, reached through the funds listed. "
-                 f"This sees through {len(seen_funds)} of {len(fund_rows)} funds, covering "
-                 f"{round(covered, 1)}% of the portfolio; direct stock holdings and funds "
-                 "with no disclosure are not included."),
+        "note": ("Each line is one company or asset, with every form you hold it in. "
+                 f"{len(seen_funds)} of {fund_total} funds are opened up from their full "
+                 f"SEBI monthly disclosure ({round(looked_through_pct, 1)}% of the "
+                 "portfolio); a fund without one, and any ETF, is a single line and is "
+                 "not looked through. Direct stocks are matched to fund holdings by "
+                 "company name, and an unmatched one stays its own line."),
     }
 
 
@@ -570,11 +682,17 @@ def section_questions(sections: dict) -> dict:
             qs.append(("HIGH", f"{p['pair']} overlap at {p['overlap_pct']:.0f}% — do both "
                                "need to exist, or is one doing the work of two?", "Overlap"))
     lt = sections.get("lookthrough") or {}
-    for e in (lt.get("top_exposures") or [])[:1]:
+    # The largest company reached by more than one route - held directly AND inside a
+    # fund, or inside two funds. A single route is just a position; several is a decision
+    # that was probably made more than once without anyone adding it up.
+    for e in (lt.get("top_exposures") or []):
         if e["held_via"] > 1 and e["total_pct"] >= 3:
+            how = ("directly and through " + str(e["held_via"] - 1) + " fund(s)"
+                   if e["direct_pct"] > 0 else f"through {e['held_via']} different funds")
             qs.append(("MEDIUM", f"{e['name']} reaches {e['total_pct']:.1f}% of the "
-                                 f"portfolio through {e['held_via']} different funds — was "
-                                 "that one decision or several?", "Look-through"))
+                                 f"portfolio {how} — was that one decision or several?",
+                       "Look-through"))
+            break
     lt = (sections.get("concentration", {}) or {}).get("lookthrough") or {}
     if lt.get("total_pct") and lt.get("via"):
         qs.append(("HIGH", f"Is ~{lt['total_pct']:.0f}% look-through {lt['stock']} "

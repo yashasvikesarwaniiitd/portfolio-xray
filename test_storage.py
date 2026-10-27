@@ -53,6 +53,24 @@ def test_every_call_degrades_quietly_when_storage_is_off(monkeypatch):
     assert storage.init_db() is False
 
 
+def test_update_degrades_quietly_like_every_other_call(monkeypatch):
+    monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert storage.update("k", "id", name="n") is False
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://u:p@127.0.0.1:1/doesnotexist")
+    monkeypatch.setattr(storage, "CONNECT_TIMEOUT", 1)
+    assert storage.update("k", "id", name="n") is False
+
+
+def test_update_refuses_nothing_to_change_and_oversized_or_empty_contents(monkeypatch):
+    """Checked before connecting, so none of these can even open a socket."""
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://u:p@127.0.0.1:1/x")
+    assert storage.update("k", "id") is False
+    assert storage.update("k", "id", csv_text="   ") is False
+    assert storage.update("k", "id", csv_text="x" * (storage.MAX_CSV_BYTES + 1)) is False
+    assert storage.update("", "id", name="n") is False
+
+
 def test_an_unreachable_database_also_degrades_rather_than_raising(monkeypatch):
     """Configured but dead — a wrong host, a paused project, a dropped network. The
     difference from the test above is that these calls actually try to connect."""
@@ -124,3 +142,28 @@ def test_a_browser_cannot_fill_the_table():
     finally:
         for pid in ids:
             storage.delete(k, pid)
+
+
+NL = chr(10)
+
+
+@pytest.mark.regression
+@requires_db
+def test_one_browser_cannot_update_anothers_portfolio():
+    """The ownership property for the UPDATE path, which is a different SQL statement from
+    load and delete and so needs its own proof: the owner hash is in its WHERE clause."""
+    assert storage.init_db()
+    alice, bob = storage.new_owner_key(), storage.new_owner_key()
+    first, second, hijack = "a,b" + NL + "1,2" + NL, "c,d" + NL + "3,4" + NL, "x,y" + NL + "9,9" + NL
+    pid = storage.save(alice, "Alice's book", first)
+    try:
+        assert pid
+        assert storage.update(bob, pid, name="hijacked", csv_text=hijack) is False
+        got = storage.load(alice, pid)
+        assert got["name"] == "Alice's book" and got["csv_text"] == first
+        assert storage.update(alice, pid, name="Renamed", csv_text=second) is True
+        got = storage.load(alice, pid)
+        assert got["name"] == "Renamed" and got["csv_text"] == second
+        assert [r["id"] for r in storage.list_for(alice)] == [pid], "updated in place"
+    finally:
+        storage.delete(alice, pid)

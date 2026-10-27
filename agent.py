@@ -199,6 +199,16 @@ def read_portfolio(path: str = DEFAULT_PORTFOLIO,
             f"Portfolio file '{path}' not found. Expected columns include: "
             f"{', '.join(REQUIRED_COLUMNS)}, plus monthly inflow columns like \"Mar'25\"."
         )
+    # A portfolio built by merging uploads is several files joined by a marker line (see
+    # portfolio_merge). Anything without the marker is one part and takes the path below,
+    # byte for byte as before, so every portfolio that existed earlier still reads the same.
+    try:
+        with open(path, encoding="utf-8-sig", errors="replace") as fh:
+            raw = fh.read()
+    except OSError:
+        raw = ""
+    if "#### xray-part ####" in raw:
+        return _read_multipart(raw, resolve_funds)
     try:
         df = pd.read_csv(path)
     except Exception as e:
@@ -256,6 +266,66 @@ def read_portfolio(path: str = DEFAULT_PORTFOLIO,
         detail = "; ".join(skipped) if skipped else "file has no data rows"
         raise ValueError(f"No valid holdings found ({detail}).")
     return holdings, skipped
+
+
+def _read_multipart(raw: str, resolve_funds: bool) -> tuple[list[dict], list[str]]:
+    """Read each part with the parser that suits it, then combine the holdings.
+
+    This is what lets one portfolio hold shares from an equity statement AND funds from a
+    mutual-fund statement: they have different columns, so they cannot share a table, but
+    they can share a portfolio.
+
+    Same instrument in two parts: merged if both are the same KIND of record (both trade
+    ledgers, or both SIP sheets), because that is just one holding with more history.
+    NOT merged if one is a ledger and the other a SIP sheet - reconstruct_holding prefers
+    real transactions over monthly amounts, so merging would silently drop the SIP history
+    - and flagged instead, since the same holding in both is probably double counted.
+    """
+    import tempfile
+    from portfolio_merge import split_parts
+
+    combined: dict = {}
+    order: list = []
+    notes: list[str] = []
+    for i, part in enumerate(split_parts(raw), start=1):
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False,
+                                          encoding="utf-8")
+        tmp.write(part)
+        tmp.close()
+        try:
+            holdings, part_notes = read_portfolio(tmp.name, resolve_funds)
+        except ValueError as e:
+            raise ValueError(f"Section {i} of this portfolio could not be read: {e}")
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+        notes += [f"section {i}: {n}" for n in part_notes]
+        for h in holdings:
+            ledger = bool(h.get("transactions"))
+            key = (str(h.get("symbol") or h["name"]).strip().lower(), ledger)
+            other = (key[0], not ledger)
+            if other in combined:
+                notes.append(f"'{h['name']}' appears in both a trade statement and a SIP "
+                             "sheet and is counted as two holdings — keep it in only one "
+                             "source to avoid counting it twice.")
+            if key in combined:
+                m = combined[key]
+                m["inflows"] = sorted(m["inflows"] + h["inflows"])
+                m["total_invested"] = round(m["total_invested"] + h["total_invested"], 2)
+                if ledger:
+                    m["transactions"] = sorted(m["transactions"] + h["transactions"],
+                                               key=lambda t: t.date)
+                for f in ("type", "market", "risk", "source"):
+                    m[f] = m.get(f) or h.get(f)
+            else:
+                combined[key] = dict(h)
+                order.append(key)
+    holdings = [combined[k] for k in order]
+    if not holdings:
+        raise ValueError("No valid holdings found in this portfolio.")
+    return holdings, notes
 
 
 def load_portfolio(path: str = DEFAULT_PORTFOLIO) -> str:

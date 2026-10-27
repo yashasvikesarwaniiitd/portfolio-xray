@@ -162,6 +162,67 @@ def names_by_isin(fund: dict) -> dict:
     return {h["isin"]: h.get("name") for h in (fund.get("holdings") or []) if h.get("isin")}
 
 
+# Words that distinguish no company: "Infosys" and "Infosys Limited" are the same one.
+_CORP_WORDS = {"limited", "ltd", "the", "pvt", "private", "inc", "corp", "corporation",
+               "co", "company", "plc", "ag", "nv", "sa", "class", "a", "b"}
+
+
+def norm_company(name: str) -> str:
+    """A company name reduced to what identifies it, for matching across sources.
+
+    The same company is "HDFC Bank", "HDFC Bank Limited" and "HDFC BANK LTD." depending on
+    who wrote it. This is deliberately NOT fuzzy: it removes punctuation and corporate
+    suffixes and nothing else, so two names only match if they say the same thing.
+    """
+    t = re.sub(r"[^a-z0-9]+", " ", str(name or "").lower().replace("&", " and "))
+    return " ".join(w for w in t.split() if w not in _CORP_WORDS)
+
+
+def company_index(doc: dict | None = None) -> dict:
+    """normalised company name -> {ISIN}, over every holding in every accepted fund."""
+    idx: dict = {}
+    for f in (doc or load())["funds"]:
+        if f.get("status") != "OK":
+            continue
+        for h in f.get("holdings") or []:
+            if h.get("kind") in EQUITY_KINDS and h.get("isin"):
+                idx.setdefault(norm_company(h.get("name")), set()).add(h["isin"])
+    return idx
+
+
+def resolve_isin(names: list, index: dict) -> str | None:
+    """The ISIN for a directly-held stock, or None - never a guess.
+
+    A portfolio row carries a ticker and a name; a fund's disclosure carries an ISIN and a
+    name. Joining them is what lets "HDFC Bank, held directly" and "HDFC Bank, held inside a
+    fund" become one line. Two tiers, both conservative:
+
+      1. exact - the normalised name equals a disclosed company's.
+      2. prefix - the name is the START of exactly one disclosed company ("Reliance" ->
+         "Reliance Industries"). If it could be several ("Tata", "HDFC") it matches nothing,
+         because merging two different companies is worse than leaving one unmerged.
+
+    Only companies that some fund in the snapshot actually holds are resolvable, which is
+    the only case where a merge could change the answer anyway.
+    """
+    for raw in names:
+        key = norm_company(raw)
+        if not key:
+            continue
+        hit = index.get(key)
+        if hit and len(hit) == 1:
+            return next(iter(hit))
+    for raw in names:
+        key = norm_company(raw)
+        if len(key) < 4:
+            continue
+        isins = {i for k, v in index.items()
+                 if k == key or k.startswith(key + " ") for i in v}
+        if len(isins) == 1:
+            return next(iter(isins))
+    return None
+
+
 def coverage(doc: dict | None = None) -> dict:
     """What the snapshot can and cannot answer, for the caller to show rather than hide."""
     doc = doc or load()

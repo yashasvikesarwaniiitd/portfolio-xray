@@ -288,38 +288,123 @@ def test_the_fund_of_funds_is_listed_as_opaque_rather_than_dropped():
         "Axis Global Equity Alpha FoF Direct Growth"]
 
 
+def fresh(**over):
+    """A pre-warmed meta cache entry, so no test touches yfinance."""
+    from datetime import date
+    return {"ts": date.today().isoformat(), "long_name": None, **over}
+
+
+def stock(name, w, symbol, typ="Share"):
+    return {"name": name, "symbol": symbol, "source": "yfinance", "type": typ,
+            "market": "India", "weight_pct": w, "risk": None}
+
+
 def test_look_through_counts_one_company_across_several_funds():
     from report import data
     rows = mf_rows(("Parag Parikh Flexi Cap Fund - Direct Growth", 40.0),
                    ("JioBlackRock Flexi Cap Fund Direct Growth", 40.0),
                    ("Tata Digital India Fund Direct Growth", 20.0))
     lt = data.section_lookthrough(rows, {})
-    assert lt["portfolio_pct_covered"] == 100.0
+    assert lt["looked_through_pct"] == 100.0
     top = lt["top_exposures"][0]
     assert top["held_via"] >= 2, "the headline exposure should be one reached twice"
     # The identity: a company's portfolio weight is the sum of (fund weight x its weight
     # inside that fund), and nothing else.
-    expected = sum(v["contributes_pct"] for v in top["via"])
-    assert abs(top["total_pct"] - expected) < 0.02
-    for v in top["via"]:
-        assert abs(v["contributes_pct"]
-                   - dict((r["name"], r["weight_pct"]) for r in rows)[v["fund"]]
-                   * v["pct_in_fund"] / 100.0) < 0.02
+    weights = {r["name"]: r["weight_pct"] for r in rows}
+    assert abs(top["total_pct"] - sum(f["pct_of_portfolio"] for f in top["forms"])) < 0.02
+    for f in top["forms"]:
+        assert abs(f["pct_of_portfolio"] - weights[f["via"]] * f["pct_in_fund"] / 100) < 0.02
 
 
-def test_look_through_says_how_much_of_the_book_it_could_not_see():
-    """Half this portfolio is a fund with no disclosure. Reporting exposures without
-    saying so would present a half-view as a whole one."""
+def test_a_stock_held_directly_and_inside_a_fund_is_one_row_with_both_forms():
+    """The headline behaviour. Previously the direct holding and the fund's slice of the
+    same company lived in different sections and the reader had to add them up."""
+    from report import data
+    cache = {"HDFCBANK.NS": fresh(long_name="HDFC Bank Limited")}
+    rows = [stock("HDFC Bank", 20.0, "HDFCBANK.NS")] + mf_rows(
+        ("Parag Parikh Flexi Cap Fund - Direct Growth", 80.0))
+    lt = data.section_lookthrough(rows, cache)
+    hdfc = next(e for e in lt["exposures"] if e["isin"] == "INE040A01034")
+    assert hdfc["direct_pct"] == 20.0 and hdfc["via_funds_pct"] > 0
+    assert abs(hdfc["total_pct"] - (hdfc["direct_pct"] + hdfc["via_funds_pct"])) < 0.01
+    assert [f["form"] for f in hdfc["forms"]] == ["Direct", "Via fund"]
+    assert hdfc["held_via"] == 2
+    assert sum(1 for e in lt["exposures"] if "hdfc bank" in e["name"].lower()) == 1, \
+        "must not appear once as a share and again as a fund holding"
+
+
+def test_a_direct_stock_no_fund_holds_stays_its_own_unmatched_row():
+    from report import data
+    rows = [stock("Some Penny Co", 5.0, "XYZ.NS")] + mf_rows(
+        ("Parag Parikh Flexi Cap Fund - Direct Growth", 95.0))
+    lt = data.section_lookthrough(rows, {"XYZ.NS": fresh()})
+    e = next(x for x in lt["exposures"] if x["name"] == "Some Penny Co")
+    assert e["isin"] is None and e["direct_pct"] == 5.0 and e["held_via"] == 1
+
+
+def test_company_names_match_across_sources_without_being_fuzzy():
+    from fund_holdings import norm_company, resolve_isin
+    assert norm_company("HDFC Bank Limited") == norm_company("HDFC BANK LTD.") == "hdfc bank"
+    assert norm_company("Larsen & Toubro Limited") == "larsen and toubro"
+    idx = {"hdfc bank": {"INE040A01034"}, "hdfc life insurance": {"INE795G01014"},
+           "reliance industries": {"INE002A01018"}, "tata motors": {"INE155A01022"},
+           "tata steel": {"INE081A01020"}}
+    assert resolve_isin(["HDFC Bank"], idx) == "INE040A01034"
+    assert resolve_isin(["Reliance"], idx) == "INE002A01018", "a unique prefix resolves"
+    assert resolve_isin(["Tata"], idx) is None, "two companies share it, so none is chosen"
+    assert resolve_isin(["HDFC"], idx) is None
+    assert resolve_isin(["Nonexistent Corp"], idx) is None
+    # A provider's longer legal name is tried first and wins over a sloppy short one.
+    assert resolve_isin(["HDFC Bank Limited", "HDFC"], idx) == "INE040A01034"
+
+
+def test_each_non_stock_holding_carries_its_own_asset_class():
+    """'Debt, gold, silver, stock': every line has a class and the classes add up."""
+    from report import data
+    rows = [stock("Nippon Gold ETF", 10.0, "GOLDBEES.NS", typ="ETF"),
+            {"name": "Axis Liquid Fund Direct Growth", "symbol": "100", "source": "mftool",
+             "type": "Mutual Fund", "market": "India", "weight_pct": 20.0, "risk": None},
+            {"name": "Bitcoin", "symbol": "BTC-USD", "source": "crypto", "type": "Crypto",
+             "market": "Global", "weight_pct": 5.0, "risk": None},
+            stock("Silver BeES", 5.0, "SILVERBEES.NS", typ="ETF"),
+            stock("Some ETF", 60.0, "SOMEETF.NS", typ="ETF")]
+    lt = data.section_lookthrough(rows, {})
+    cls = {c["asset_class"]: c["pct"] for c in lt["by_class"]}
+    assert cls["Gold & Silver"] == 15.0
+    assert cls["Debt"] == 20.0
+    assert cls["Crypto"] == 5.0
+    assert cls["ETF (not looked through)"] == 60.0
+    assert abs(lt["sum_of_rows_pct"] - 100.0) < 0.01, "every rupee must land in some class"
+
+
+def test_look_through_says_how_much_of_the_book_it_could_not_open_up():
+    """Half this portfolio is a fund with no disclosure. It must appear as ONE line and the
+    summary must say so, rather than being dropped or treated as holding nothing."""
     from report import data
     lt = data.section_lookthrough(mf_rows(
         ("Parag Parikh Flexi Cap Fund - Direct Growth", 50.0),
         ("Kotak Small Cap Fund Direct Growth", 50.0)), {})
-    assert lt["portfolio_pct_covered"] == 50.0
+    assert lt["looked_through_pct"] == 50.0
     assert lt["funds_seen_through"] == ["Parag Parikh Flexi Cap Fund - Direct Growth"]
-    assert "1 of 2 funds" in lt["note"]
+    assert lt["funds_total"] == 2 and "1 of 2 funds" in lt["note"]
+    kotak = next(e for e in lt["exposures"] if e["name"].startswith("Kotak"))
+    assert kotak["asset_class"] == "Fund (holdings not disclosed)"
+    assert kotak["total_pct"] == 50.0
 
 
-def test_look_through_degrades_when_nothing_is_disclosed():
+def test_look_through_of_a_book_with_nothing_disclosed_is_still_an_answer():
+    """It used to return an error. With direct holdings and per-line classes there is
+    always something true to say - here, that the whole book is one opaque fund."""
     from report import data
     lt = data.section_lookthrough(mf_rows(("Kotak Small Cap Fund Direct Growth", 100.0)), {})
-    assert "error" in lt
+    assert "error" not in lt
+    assert lt["looked_through_pct"] == 0.0 and lt["funds_seen_through"] == []
+    assert lt["exposures"][0]["total_pct"] == 100.0
+
+
+def test_a_zero_weight_holding_is_left_out_not_listed_at_zero():
+    from report import data
+    lt = data.section_lookthrough(
+        [stock("Unpriced Co", 0.0, "U.NS"), stock("Real Co", 100.0, "R.NS")],
+        {"U.NS": fresh(), "R.NS": fresh()})
+    assert [e["name"] for e in lt["exposures"]] == ["Real Co"]

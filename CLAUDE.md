@@ -26,6 +26,16 @@ reconstructed, and it can express SELLS, which the SIP sheet cannot.
 - Sale proceeds are POSITIVE cashflows for XIRR.
 - MF scheme names resolve to AMFI codes by splitting core/plan/option; contradicting the
   stated plan is penalised, never defaulted to Direct Growth.
+- A portfolio is a sequence of PARTS (`portfolio_merge.PART_DELIM`), one per source file,
+  read by their own parser and combined by `agent.read_portfolio`. Adding a file merges
+  it: statement rows dedupe on a hash of all column values (multiset, so two identical
+  fills in one file stay two trades); SIP sheets merge by holding identity, newer month
+  figure wins. A file with no delimiter is a one-part portfolio and reads as before.
+- Statement-sourced holdings arrive with no type or market; `infer_instrument` fills them
+  from the venue suffix and price source. Without it they classify as "Other" and every
+  stock-level section skips them.
+- Saving is automatic when `SUPABASE_DB_URL` is set, never when it isn't, and never for the
+  sample. Remove deletes the saved copy too, or it would return on refresh.
 
 ## Currency and benchmarks
 - Portfolio maths is in INR. Dollar-quoted holdings (US tickers, crypto pairs) are

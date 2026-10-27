@@ -114,7 +114,7 @@ uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py \
   -m "not regression" -q
 ```
 
-**306 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
+**347 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
 verification, prompt injection, provider translation) is tested as deterministic logic.
 266 pass and one skips unless the optional `tracing` extra is installed
 (`uv sync --extra tracing`).
@@ -190,7 +190,7 @@ question ─► ROUTER GATE ──advice──► canned refusal      (REFUSED, 
 ```
 
 Clean-architecture layering (`domain` / `application` / `ports` / `adapters`) is what lets
-the whole loop run against a scripted model and canned tools: **306 hermetic tests, no
+the whole loop run against a scripted model and canned tools: **347 hermetic tests, no
 network, no API key.**
 
 SQLite logs every query's tokens, cost and latency, and every CLI investigation's outcome,
@@ -322,10 +322,15 @@ built.
 - **Tiered inputs**: weights-only (Tier 1) unlocks allocation/diversification/
   concentration/overlap — no amounts needed. Monthly SIP history (Tier 2) unlocks exact
   values, risk and cost. The report says exactly what each tier unlocks.
-- **Nothing is stored unless you ask for it.** Analysing a portfolio keeps nothing: it
-  lives in a temp file for one request and is deleted in a `finally` on every endpoint
-  that accepts one. The single exception is the **Save** button, which is opt-in, per
-  portfolio, and described in its own bullet below. The generated Excel report is
+- **Analysis keeps nothing; saving is separate, automatic, and switchable.** Analysing a
+  portfolio keeps nothing: it lives in a temp file for one request and is deleted in a
+  `finally` on every endpoint that accepts one. The one thing the product stores is the
+  *saved portfolio* (its own bullet below). That used to need a button press nobody
+  pressed, so a refresh emptied the page while the database sat empty; it is now
+  automatic whenever the server has a database configured, and visibly so: the sidebar
+  says "Saved automatically" and every saved portfolio has a delete button. Where no
+  database is configured nothing is stored at all, and the sample is never stored. The
+  generated Excel report is
   deleted by a `BackgroundTask` once the response has been sent — it cannot be unlinked
   before `FileResponse` streams it, and for a while it was not being unlinked at all,
   which left a complete portfolio workbook on disk after every report. Found by auditing
@@ -335,9 +340,29 @@ built.
   amounts. There is a test asserting the table has no column that could carry any.
 - **Several portfolios at once**: add them from the sidebar — the sample, or your own CSV
   — and switch between them from the row above the page title. Every page follows the
-  selected one, the analyst included. They live in Streamlit's session state and vanish on
-  refresh. Switching clears the chat thread, because figures from one book have no
-  business sitting under another's heading.
+  selected one, the analyst included. With saving on they reopen after a refresh (below);
+  without it they live in session state only. Switching clears the chat thread, because
+  figures from one book have no business sitting under another's heading.
+- **Adding to a portfolio without double-counting it.** Upload opens a dialog with two
+  intents. *Update* merges the file into the open portfolio; *Add as a new portfolio* asks
+  for a name instead of inheriting the export's filename. Every row has a unique key (a
+  hash over all its column values, so column order and `1,600.00` vs `1600` don't matter),
+  which is what makes a re-uploaded or overlapping statement add only the trades that are
+  genuinely new. Identical fills inside one file are kept as two trades — the rule is a
+  multiset, not a set. A SIP sheet merges by holding (type, name, symbol, source), so a
+  new month extends the existing row and `Apr'25` and `April'25` are one column. A stock
+  statement and a mutual-fund statement have different columns, so they become separate
+  *sections* of one portfolio, read by their own parser and combined. The dialog previews
+  what will change before anything is applied. See `portfolio_merge.py`.
+- **What you actually own.** A holding's name says nothing about exposure, so the analysis
+  page lists each company once with every form it is held in: HDFC Bank held directly *and*
+  inside a fund is one row, `Direct 18.2% · Parag Parikh Flexi 3.5%`, totalling 21.7%.
+  Funds with a full disclosure are opened up into companies and into debt, cash and hedge
+  classes; every other holding is one line carrying its own class (gold and silver, debt,
+  crypto, an undisclosed fund). The rows add up to the whole portfolio. Direct stocks are
+  matched to fund holdings by company name — exact, or a *unique* prefix — and an
+  ambiguous name ("Tata", "HDFC") matches nothing rather than the wrong company. ETFs are
+  not opened up yet.
 - **Saving, and what it costs you.** A loaded portfolio can be saved to Postgres
   (Supabase), and that is the only user data this product keeps. It is worth being exact
   about the trade, because there are no accounts:
@@ -345,7 +370,10 @@ built.
     analysis — that is a function of today's prices, so a stored copy would be a wrong
     answer dressed as a saved one. Re-running it on load costs seconds and tells the truth.
   - **Who can read it:** whoever holds the key. Your browser mints a random 128-bit secret
-    on first save and keeps it in the URL as `?k=…`; the server stores only its SHA-256,
+    on first save, keeps it in the URL as `?k=…` and remembers it in `localStorage`, so
+    opening the bare address tomorrow puts it back and reopens your last portfolio. (A
+    key already remembered is never overwritten by a `?k=` in a link someone sends you.)
+    The server stores only its SHA-256,
     and the owner hash is part of the `WHERE` clause, so a wrong key finds no row rather
     than finding one and being refused. A database dump yields hashes, not keys.
   - **The cost of having no accounts:** the URL *is* the password. Anyone you send it to

@@ -90,6 +90,39 @@ def owner_key(create: bool = False) -> str:
     return k
 
 
+def keep_owner_key_in_browser() -> None:
+    """Make the saved portfolios survive closing the tab, not just refreshing it.
+
+    The key lives in the URL (see owner_key), which survives a refresh but not someone
+    typing the address again tomorrow - and "I came back and everything was gone" is exactly
+    the failure saving exists to prevent. Streamlit has no writable browser storage, so a
+    few lines of script do it: remember the key in localStorage, and when the page is opened
+    WITHOUT one, put the remembered key back into the URL.
+
+    An existing remembered key is never overwritten by a `?k=` in the URL. Opening a link
+    someone sent you should show you their portfolios for that visit, not silently replace
+    the key that opens your own.
+
+    The key is embedded in the body so that the element changes - and the script re-runs -
+    the moment a first save mints one; otherwise it would run once, before there was
+    anything to remember.
+    """
+    k = owner_key()
+    # `k` comes straight from the URL and is about to be written into a script. A link like
+    # ?k=';alert(1);' would otherwise run attacker script in the victim's page, so only a
+    # well-formed key (32 hex characters, which is all this app ever mints) is embedded.
+    if not (len(k) == 32 and all(c in "0123456789abcdef" for c in k)):
+        k = ""
+    st.html(
+        "<script>(function(){try{var S='xray_owner_key',K='" + k + "';"
+        "var u=new URL(window.location.href),q=u.searchParams.get('k');"
+        "if(q){if(!localStorage.getItem(S)){localStorage.setItem(S,q);}}"
+        "else{var s=localStorage.getItem(S);"
+        "if(s&&/^[0-9a-f]{32}$/.test(s)){u.searchParams.set('k',s);"
+        "window.location.replace(u.toString());}}}catch(e){}})();</script>",
+        unsafe_allow_javascript=True)
+
+
 def saved_list() -> tuple[bool, list]:
     """(storage_enabled, rows). Cached in session state, because the rail re-renders on
     EVERY interaction and this is a database round trip to another continent.
@@ -106,21 +139,59 @@ def saved_list() -> tuple[bool, list]:
     """
     if ss.get("saved_cache") is not None:
         return ss.saved_cache
+    if ss.get("storage_off"):
+        return False, []
     k = owner_key()
     if not k:
         return True, []                      # no key yet: nothing to fetch, nothing to cache
     code, data = call_json("GET", "/portfolios", headers={"X-Owner-Key": k})
-    out = ((False, []) if code != 200 or not isinstance(data, dict)
-           else (bool(data.get("enabled")), data.get("portfolios") or []))
+    if code != 200 or not isinstance(data, dict):
+        # Not cached: a sleeping free-tier backend answers the next request fine, and
+        # remembering this failure would hide the saved list for the rest of the session.
+        return False, []
+    out = (bool(data.get("enabled")), data.get("portfolios") or [])
     ss.saved_cache = out
     return out
 
 
-def saved_save(name: str, csv_text: str) -> str | None:
+def saved_save(name: str, csv_text: str) -> tuple[str | None, str | None]:
+    """(portfolio id, error). Both None means storage is simply switched off.
+
+    The owner key is minted here, on the first save, which puts `?k=` in the URL. If the
+    server then says saving is off (503) that key was minted for nothing, so it is taken
+    back out - a deployment without a database should not leave a meaningless token in
+    every uploader's address bar.
+    """
+    had_key = bool(owner_key())
     code, data = call_json("POST", "/portfolios", headers={"X-Owner-Key": owner_key(True)},
                            json={"name": name, "csv_text": csv_text})
     ss.saved_cache = None
-    return None if code == 200 else (data.get("error") or "Could not save.")
+    if code == 200:
+        return data.get("id"), None
+    if code == 503:
+        ss.storage_off = True
+        if not had_key:
+            st.query_params.pop("k", None)
+        return None, None
+    return None, (data.get("error") or "Could not save.")
+
+
+def saved_update(pid: str, csv_text: str | None = None, name: str | None = None) -> str | None:
+    """Change a saved portfolio in place. Returns an error message, or None on success."""
+    body = {k: v for k, v in (("csv_text", csv_text), ("name", name)) if v is not None}
+    code, data = call_json("PUT", f"/portfolios/{pid}", headers={"X-Owner-Key": owner_key()},
+                           json=body)
+    ss.saved_cache = None
+    return None if code == 200 else (data.get("error") or "Could not update the saved copy.")
+
+
+def merge_remote(existing: str, incoming: str) -> tuple[dict | None, str | None]:
+    """Ask the server to fold `incoming` into `existing`. (result, error)."""
+    code, data = call_json("POST", "/merge",
+                           json={"existing_csv": existing or "", "incoming_csv": incoming})
+    if code == 200 and "csv_text" in data:
+        return data, None
+    return None, (UNREACHABLE if code == 0 else data.get("error", "Could not merge."))
 
 
 def saved_load(pid: str) -> dict | None:
@@ -365,7 +436,7 @@ header[data-testid="stHeader"] { background: transparent; }
 .tbl .ty { color: var(--ink3); font-size: 13px; }
 .tbl .share { display: flex; align-items: center; gap: 10px; }
 .tbl .share .track { flex: 1; }
-.tbl .share .v { width: 48px; text-align: right; color: var(--ink2);
+.tbl .share .v { width: 62px; text-align: right; color: var(--ink2);
   font-variant-numeric: tabular-nums; }
 .tbl .na { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink3); }
 .tbl .dim { color: var(--ink2); }
@@ -526,6 +597,16 @@ def _seg_color(name: str) -> str:
         return _V_INDIA
     if n == "us" or n.endswith(" us"):
         return _V_US
+    # Classes from the look-through strip, which have no market in their name. Without
+    # these every segment fell through to the same grey and the bar read as one block.
+    if n.startswith("equity"):
+        return _V_INDIA
+    if n.startswith("debt"):
+        return _V_US
+    if n.startswith("cash"):
+        return _V_GLOBAL
+    if n.startswith(("fund", "etf")):
+        return _V_MF
     return MUTED
 
 
@@ -584,10 +665,13 @@ def portfolio_switcher() -> None:
         for col, name in zip(cols, chunk):
             with col:
                 if name == "·remove·":
+                    saved_copy = bool((ss.portfolios.get(ss.active) or {}).get("pid"))
                     if st.button("Remove", key="pf_del", use_container_width=True,
                                  icon=":material/close:",
-                                 help=f"Forget “{ss.active}” in this browser session"):
-                        ss.portfolios.pop(ss.active, None)
+                                 help=(f"Delete “{ss.active}”, including its saved copy"
+                                       if saved_copy else
+                                       f"Remove “{ss.active}” from this session")):
+                        forget_portfolio(ss.active)
                         activate_portfolio(next(iter(ss.portfolios)))
                         st.rerun()
                 elif st.button(name, key=f"pf_{name}", use_container_width=True,
@@ -615,10 +699,14 @@ ss.setdefault("csv_text", None)      # user's own portfolio, held in memory only
 # spouse's, or a what-if. Held ONLY in this browser session: nothing is written server
 # side, which is what keeps the "nothing you upload is stored" promise true. They are lost
 # on refresh, and that is the trade being made deliberately.
-ss.setdefault("portfolios", {})      # name -> {csv_text, analysis, label}
+ss.setdefault("portfolios", {})      # name -> {csv_text, analysis, label, pid}
 ss.setdefault("active", None)
 ss.setdefault("rail_upload_sig", None)   # the last file the rail uploader tried
 ss.setdefault("saved_cache", None)       # (enabled, rows); None = refetch
+ss.setdefault("storage_off", False)      # the server said saving is not switched on
+ss.setdefault("restored", False)         # have we already tried to reopen a saved portfolio
+ss.setdefault("flash", None)             # (kind, text) to show once after the next rerun
+ss.setdefault("save_note", None)         # why the last auto-save did not happen, if it didn't
 ss.setdefault("chat", [])
 ss.setdefault("queued", None)
 ss.setdefault("pending", None)   # question awaiting an answer (already shown in the thread)
@@ -665,7 +753,8 @@ def unique_name(base: str) -> str:
     return f"{name} ({i})"
 
 
-def load_analysis(csv_text: str | None, label: str, name: str | None = None) -> bool:
+def load_analysis(csv_text: str | None, label: str, name: str | None = None,
+                  replace: str | None = None, pid: str | None = None) -> bool:
     """True if the portfolio loaded. The caller MUST NOT rerun on False.
 
     It used to return None and every caller rerun unconditionally, which repainted the page
@@ -684,8 +773,13 @@ def load_analysis(csv_text: str | None, label: str, name: str | None = None) -> 
             code, data = call_json("GET", "/analysis", cold_slot=slot)
     slot.empty()
     if code == 200 and "snapshot" in data:
-        key = unique_name(name or label)
-        ss.portfolios[key] = {"csv_text": csv_text, "analysis": data, "label": label}
+        # `replace` names an EXISTING portfolio to overwrite in place (an update after
+        # merging a file in), so it keeps its slot in the switcher and its saved id rather
+        # than becoming "Name (2)" next to a stale copy of itself.
+        key = replace if replace in ss.portfolios else unique_name(name or label)
+        keep_pid = (ss.portfolios.get(key) or {}).get("pid")
+        ss.portfolios[key] = {"csv_text": csv_text, "analysis": data, "label": label,
+                              "pid": pid or keep_pid}
         activate_portfolio(key)
         ss.page = "analysis"
         return True
@@ -698,6 +792,56 @@ def load_analysis(csv_text: str | None, label: str, name: str | None = None) -> 
     st.error(UNREACHABLE if code == 0 else
              data.get("error", UNREACHABLE))
     return False
+
+
+def persist(key: str) -> None:
+    """Keep the portfolio called `key` in the database, so a refresh does not lose it.
+
+    This runs automatically on every load and every update. It used to be a "Save this
+    portfolio" button the reader had to remember to press, and nobody did - the portfolio
+    simply vanished on refresh and the database sat empty, which looked like storage not
+    working when it was storage never being asked.
+
+    Failure is never fatal and never loud: the portfolio stays usable for this session and
+    a one-line note says it was not kept. An update whose saved row has gone (expired, or
+    deleted from another tab) falls back to saving a fresh one.
+    """
+    entry = ss.portfolios.get(key)
+    if not entry or not entry["csv_text"] or ss.storage_off:
+        return
+    if entry.get("pid"):
+        if saved_update(entry["pid"], csv_text=entry["csv_text"], name=key) is None:
+            ss.save_note = None
+            return
+        entry["pid"] = None
+    pid, err = saved_save(key, entry["csv_text"])
+    if pid:
+        entry["pid"] = pid
+        ss.save_note = None
+    elif err:
+        ss.save_note = err
+
+
+def forget_portfolio(key: str) -> None:
+    """Remove a portfolio, including its saved copy - otherwise it would come straight back
+    on the next refresh, which is the opposite of what pressing Remove means."""
+    entry = ss.portfolios.pop(key, None)
+    if entry and entry.get("pid"):
+        saved_delete(entry["pid"])
+
+
+def open_saved(row: dict) -> bool:
+    """Open a saved portfolio. One already open in this session is just switched to."""
+    for key, entry in ss.portfolios.items():
+        if entry.get("pid") == row["id"]:
+            activate_portfolio(key)
+            ss.page = "analysis"
+            return True
+    got = saved_load(row["id"])
+    if not got:
+        st.error("That portfolio could not be loaded.")
+        return False
+    return load_analysis(got["csv_text"], "Saved portfolio", name=got["name"], pid=got["id"])
 
 
 def rows_to_csv(df: pd.DataFrame) -> tuple[str, int]:
@@ -722,6 +866,112 @@ def rows_to_csv(df: pd.DataFrame) -> tuple[str, int]:
                      f"{float(amount):.0f}")
         n += 1
     return header + "\n".join(lines) + "\n", n
+
+
+# ---------------------------------------------------------------- the upload dialog
+
+@st.dialog("Add a portfolio file", width="medium")
+def upload_dialog() -> None:
+    """One file, two intentions: extend the portfolio you are on, or start a new one.
+
+    UPDATE merges the file into the open portfolio, recognising rows it already holds, so a
+    statement exported twice - or two exports whose dates overlap - changes nothing the
+    second time rather than doubling every position. The server computes the merge and the
+    dialog shows what it WOULD do before anything is applied, which is the only way a
+    person can tell "added 12 trades" from "silently did nothing".
+
+    NEW creates a separate portfolio under a name the person chooses. It used to take the
+    file's name, which for a Groww export is something like "Stocks_Order_History_2024-
+    25_xyz" and not something anyone wants in a switcher.
+
+    The sample cannot be updated: it is the server's own file, not text this browser holds.
+    """
+    active = ss.active
+    can_update = bool(active and (ss.portfolios.get(active) or {}).get("csv_text"))
+    modes = ([f"Update “{active}”"] if can_update else []) + ["Add as a new portfolio"]
+    mode = st.radio("What should this file do?", modes, key=f"dlg_mode_{active}_{can_update}")
+    updating = can_update and mode == modes[0]
+    if updating:
+        st.caption("Adds the new trades or months to this portfolio. Anything already in it "
+                   "is recognised and skipped, so uploading the same file again changes "
+                   "nothing. Stocks and mutual funds can live in the same portfolio.")
+    else:
+        st.caption("Keeps your current portfolio as it is and creates a separate one you can "
+                   "switch to from the top of the page."
+                   + (" The sample cannot be added to, so it is always a new portfolio."
+                      if active and not can_update else ""))
+
+    f = st.file_uploader("CSV file", type=["csv"], key="dlg_file")
+    if f is None:
+        ss.dlg_sig = None
+        st.caption("A Groww equity or mutual-fund transaction report, or the SIP sheet. "
+                   "Max 200 MB.")
+        return
+    text = f.getvalue().decode("utf-8-sig", "replace")
+
+    if updating:
+        sig = (f.name, f.size, active, len(ss.portfolios[active]["csv_text"] or ""))
+        cached = ss.get("dlg_merge")
+        if not cached or cached[0] != sig:
+            with st.spinner("Checking what is new in this file…"):
+                res, err = merge_remote(ss.portfolios[active]["csv_text"], text)
+            ss.dlg_merge = cached = (sig, res, err)
+        _, res, err = cached
+        if err:
+            st.error(err)
+            return
+        report = res["report"]
+        (st.success if report["changed"] else st.info)(res["summary"])
+        for n in report.get("notes") or []:
+            st.caption(n)
+        if st.button("Update portfolio", type="primary", use_container_width=True,
+                     disabled=not report["changed"], key="dlg_go_update"):
+            if load_analysis(res["csv_text"], ss.portfolios[active]["label"], replace=active):
+                persist(active)
+                ss.flash = ("success", f"“{active}” updated. {res['summary']}")
+                ss.dlg_merge = None
+                st.rerun()
+        return
+
+    stem = os.path.splitext(f.name)[0][:40] or "Portfolio"
+    sig = (f.name, f.size)
+    if ss.get("dlg_sig") != sig:
+        # Pre-fill from the file name once per file, so editing the name is not undone by
+        # the next rerun. Set before the widget exists in this run, which is what makes
+        # assigning to a widget's key legal.
+        ss.dlg_sig = sig
+        ss.dlg_name = stem
+    name = st.text_input("Portfolio name", key="dlg_name", max_chars=40,
+                         help="Shown in the switcher at the top of every page.")
+    clean = " ".join(name.split())
+    final = unique_name(clean) if clean else ""
+    if clean and final != clean:
+        st.caption(f"You already have a portfolio called “{clean}”, so this one will be "
+                   f"named “{final}”.")
+    if st.button("Add portfolio", type="primary", use_container_width=True,
+                 disabled=not clean, key="dlg_go_new"):
+        if load_analysis(text, "Your portfolio", name=clean):
+            persist(ss.active)
+            ss.flash = ("success", f"“{ss.active}” added.")
+            st.rerun()
+
+
+# ---------------------------------------------------------------- restore on refresh
+
+keep_owner_key_in_browser()
+if not ss.restored:
+    # Once per session. A refresh wipes session state, so without this the saved portfolio
+    # sat in the database while the page showed "nothing loaded" - storage working, and
+    # indistinguishable from storage broken. The most recently used one reopens; the rest
+    # are one click away in the Saved list.
+    ss.restored = True
+    if owner_key() and not ss.portfolios:
+        _ok, _rows = saved_list()
+        if _rows:
+            open_saved(_rows[0])
+        elif not _ok:
+            ss.flash = ("warning", "Your saved portfolios could not be reached just now "
+                                   "(the server may be waking up). Reload in a moment.")
 
 
 # ---------------------------------------------------------------- the dark rail
@@ -782,71 +1032,66 @@ with st.sidebar:
             if load_analysis(None, "Sample portfolio", name="Sample"):
                 st.rerun()
 
-    up = st.file_uploader("Upload a CSV", type=["csv"], key="rail_upload",
-                          label_visibility="collapsed")
-    if up is not None:
-        # Attempt each distinct file ONCE. The widget keeps handing the same file back on
-        # every rerun, so without this a rejected CSV would retry forever and the error
-        # it produced would be redrawn on top of itself.
-        sig = (up.name, up.size)
-        if sig != ss.rail_upload_sig:
-            ss.rail_upload_sig = sig
-            stem = os.path.splitext(up.name)[0][:28] or "Portfolio"
-            if load_analysis(up.getvalue().decode("utf-8", "replace"),
-                             "Your portfolio (not stored)", name=stem):
-                st.rerun()
+    # Upload opens a dialog rather than showing a bare dropzone, because "add this file"
+    # is two different intentions: extend the portfolio you are looking at, or start a new
+    # one. A dropzone cannot ask which, and guessing wrong either duplicates a portfolio or
+    # overwrites one.
+    if st.button("Upload", key="rail_upload_btn", use_container_width=True,
+                 icon=":material/upload:"):
+        upload_dialog()
     st.markdown('<div class="rail-cap">A Groww equity or mutual-fund transaction report, '
                 'or the SIP sheet.</div>', unsafe_allow_html=True)
 
     # --- saved portfolios -----------------------------------------------------------
+    # Shown only once saving is known to work - a key exists, or something has been saved.
+    # A deployment with no database never shows it, rather than promising something it
+    # cannot do and then quietly not doing it.
     enabled, saved = saved_list()
-    if enabled:
+    has_saved_copy = any(e.get("pid") for e in ss.portfolios.values())
+    if enabled and not ss.storage_off and (owner_key() or has_saved_copy):
         st.markdown('<div class="rail-hr"></div>', unsafe_allow_html=True)
         st.markdown('<div class="rail-label">Saved</div>', unsafe_allow_html=True)
 
-        if ss.analysis and ss.csv_text:
-            # Only an uploaded book can be saved. The sample is already one click away and
-            # a copy of it would just be clutter in a list capped at a dozen.
-            if st.button("Save this portfolio", key="save_pf", use_container_width=True,
-                         icon=":material/bookmark_add:"):
-                err = saved_save(ss.active or "Portfolio", ss.csv_text)
-                if err:
-                    st.error(err)
-                else:
-                    st.rerun()
-
+        open_pids = {e.get("pid"): k for k, e in ss.portfolios.items() if e.get("pid")}
         for row in saved:
             c1, c2 = st.columns([4, 1])
             with c1:
+                is_active = open_pids.get(row["id"]) == ss.active and ss.active is not None
                 if st.button(row["name"], key=f"sv_{row['id']}", use_container_width=True,
                              icon=":material/folder_open:",
+                             type="primary" if is_active else "secondary",
                              help=f"Saved {row['created_at'][:10]}"):
-                    got = saved_load(row["id"])
-                    if got and load_analysis(got["csv_text"], "Saved portfolio",
-                                             name=got["name"]):
+                    if open_saved(row):
                         st.rerun()
-                    elif not got:
-                        st.error("That portfolio could not be loaded.")
             with c2:
                 if st.button("", key=f"rm_{row['id']}", use_container_width=True,
                              icon=":material/delete:", help="Delete permanently"):
+                    for k, e in list(ss.portfolios.items()):
+                        if e.get("pid") == row["id"]:
+                            ss.portfolios.pop(k)
                     saved_delete(row["id"])
+                    if ss.active not in ss.portfolios:
+                        ss.active = None
+                        if ss.portfolios:
+                            activate_portfolio(next(iter(ss.portfolios)))
+                        else:
+                            ss.analysis, ss.csv_text, ss.source_label = None, None, None
                     st.rerun()
 
-        if not saved:
-            st.markdown('<div class="rail-cap">Nothing saved yet. Load a portfolio of '
-                        'your own, then save it to find it here next time.</div>',
-                        unsafe_allow_html=True)
-        else:
+        if ss.save_note:
+            st.markdown(f'<div class="rail-cap">Not saved: {_html.escape(ss.save_note)} '
+                        'It stays open for this session.</div>', unsafe_allow_html=True)
+        elif saved:
             # The URL IS the key. Saying so is the only honest way to offer this without
             # accounts: there is no password to steal and no way to recover a lost link.
-            st.markdown('<div class="rail-cap">Bookmark this page — the link is what '
-                        'brings these back, and anyone you send it to can see them. '
-                        f'Kept {STORAGE_TTL_DAYS} days.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="rail-cap">Saved automatically. This browser remembers '
+                        'the link that brings them back; anyone you send it to can see '
+                        f'them. Kept {STORAGE_TTL_DAYS} days.</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="rail-foot">Educational only — not advice, not '
-                'SEBI-registered. Portfolios you upload are analysed and discarded; only '
-                'the ones you explicitly save are kept.</div>',
+                'SEBI-registered. A portfolio you add is saved so it is still here after a '
+                'refresh (only if saving is switched on for this server); delete it any '
+                'time. The sample is never stored.</div>',
                 unsafe_allow_html=True)
 
 
@@ -944,6 +1189,24 @@ def page_ask() -> None:
 
 
 # ---------------------------------------------------------------- page: analysis
+
+_FUND_NOISE = {"fund", "direct", "growth", "plan", "option", "regular", "idcw", "-", "–"}
+
+
+def _short_fund(name: str) -> str:
+    """"Parag Parikh Flexi Cap Fund - Direct Growth" -> "Parag Parikh Flexi". Enough to tell
+    funds apart in a narrow column without the plan and option words every name ends with."""
+    words = [w for w in str(name or "").split() if w.lower() not in _FUND_NOISE]
+    return " ".join(words[:3]) or str(name or "")
+
+
+def forms_text(e: dict) -> str:
+    """How one exposure is held: "Direct 20.00% · Parag Parikh Flexi 3.10%"."""
+    return " · ".join(
+        f'{"Direct" if f["form"] == "Direct" else _short_fund(f["via"] or f["form"])} '
+        f'{f["pct_of_portfolio"]:.2f}%' for f in e["forms"][:4]
+    ) + (f' · +{len(e["forms"]) - 4} more' if len(e["forms"]) > 4 else "")
+
 
 def page_analysis() -> None:
     portfolio_switcher()
@@ -1126,39 +1389,64 @@ def page_analysis() -> None:
 
     st.write("")
 
-    # --- what you actually own (look-through) ---------------------------------------
-    # A fund name says nothing about exposure. This counts the same company through every
-    # fund that holds it. It is shown only when a full disclosure exists, and it states
-    # how much of the book it could see rather than implying it saw all of it.
+    # --- what you actually own ---------------------------------------------------------
+    # A holding's NAME says nothing about exposure. HDFC Bank held as a share and also inside
+    # a fund is one exposure held two ways, so this lists each company once with every form
+    # it is held in. The class strip above it covers the non-stock sleeves - debt, cash, gold
+    # and silver, crypto - so the whole portfolio is accounted for. Shown only when there is
+    # something to add: a book of nothing but direct shares would just repeat the table below.
     lt = sec.get("lookthrough") or {}
-    if lt.get("top_exposures"):
-        as_of = ", ".join(lt.get("as_of") or []) or "—"
+    expo = lt.get("exposures") or []
+    worth_showing = expo and (lt.get("funds_seen_through")
+                              or any(e["held_via"] > 1 for e in expo)
+                              or len(lt.get("by_class") or []) > 1)
+    if worth_showing:
+        as_of = ", ".join(lt.get("as_of") or [])
         st.markdown(
             '<div class="sec-head" style="margin:6px 0 12px"><div class="sec-t">What you '
-            'actually own</div><div class="sec-s">through your funds · as of '
-            f'{_html.escape(as_of)}</div></div>', unsafe_allow_html=True)
-        lt_rows = ['<div class="tbl"><div class="hd"><div>Company</div>'
-                   '<div class="ty">Funds</div><div>Share of portfolio</div>'
-                   '<div class="r">Reached via</div><div class="r">ISIN</div></div>']
-        for e in lt["top_exposures"]:
-            w = e["total_pct"]
-            via = ", ".join(v["fund"] for v in e["via"][:2])
-            if len(e["via"]) > 2:
-                via += f' +{len(e["via"]) - 2}'
-            lt_rows.append(
-                f'<div class="tr"><div>{_html.escape(e["name"] or e["isin"])}</div>'
-                f'<div class="ty">{e["held_via"]}</div>'
-                f'<div class="share"><div class="track">'
-                f'<div style="width:{min(w * 12, 100):.0f}%"></div></div>'
-                f'<span class="v">{w:.2f}%</span></div>'
-                f'<div class="r dim">{_html.escape(via)}</div>'
-                f'<div class="r muted">{_html.escape(e["isin"])}</div></div>')
-        lt_rows.append("</div>")
-        st.markdown("".join(lt_rows), unsafe_allow_html=True)
-        st.markdown(f'<div class="note">{_html.escape(lt["note"])} '
-                    f'{lt["distinct_companies"]} distinct companies sit behind the '
-                    f'{len(lt["funds_seen_through"])} fund(s) seen through.</div>',
+            'actually own</div><div class="sec-s">every way you hold it, added up'
+            + (f' · fund data as of {_html.escape(as_of)}' if as_of else '')
+            + '</div></div>', unsafe_allow_html=True)
+
+        classes = [(c["asset_class"], float(c["pct"])) for c in lt["by_class"]
+                   if c["pct"] > 0]
+        if classes:
+            st.markdown('<div class="card">' + stacked(classes) + '</div>',
+                        unsafe_allow_html=True)
+            st.write("")
+
+        top = lt.get("top_exposures") or []
+        if top:
+            lt_rows = ['<div class="tbl"><div class="hd"><div>Company</div>'
+                       '<div class="ty">Forms</div><div>Share of portfolio</div>'
+                       '<div class="r">How you hold it</div></div>']
+            for e in top[:12]:
+                w = e["total_pct"]
+                lt_rows.append(
+                    f'<div class="tr"><div>{_html.escape(e["name"])}</div>'
+                    f'<div class="ty">{e["held_via"]}</div>'
+                    f'<div class="share"><div class="track">'
+                    f'<div style="width:{min(w * 8, 100):.0f}%"></div></div>'
+                    f'<span class="v">{w:.2f}%</span></div>'
+                    f'<div class="r dim">{_html.escape(forms_text(e))}</div></div>')
+            lt_rows.append("</div>")
+            st.markdown("".join(lt_rows), unsafe_allow_html=True)
+
+        st.markdown(f'<div class="note">{_html.escape(lt["note"])}</div>',
                     unsafe_allow_html=True)
+        with st.expander(f"Search all {len(expo)} lines"
+                         + (f" (of {lt['rows_total']})" if lt["rows_total"] > len(expo) else "")):
+            df = pd.DataFrame([{
+                "Name": e["name"], "Class": e["asset_class"],
+                "Total %": e["total_pct"], "Direct %": e["direct_pct"],
+                "Through funds %": e["via_funds_pct"], "How you hold it": forms_text(e),
+            } for e in expo])
+            st.dataframe(df, hide_index=True, use_container_width=True,
+                         column_config={
+                             "Total %": st.column_config.NumberColumn(format="%.2f"),
+                             "Direct %": st.column_config.NumberColumn(format="%.2f"),
+                             "Through funds %": st.column_config.NumberColumn(format="%.2f"),
+                         })
         st.write("")
 
     # --- holdings table -------------------------------------------------------------
@@ -1288,8 +1576,8 @@ def page_holdings() -> None:
     with c1:
         if st.button("Analyse my portfolio →", type="primary", use_container_width=True,
                      disabled=ready == 0):
-            if load_analysis(csv_text, "Your portfolio (not stored)",
-                             name="Typed holdings"):
+            if load_analysis(csv_text, "Your portfolio", name="Typed holdings"):
+                persist(ss.active)
                 st.rerun()
     with c2:
         st.download_button("Blank template", data=csv_text if ready else
@@ -1319,12 +1607,19 @@ def page_holdings() -> None:
             if not payload:
                 st.warning("Upload or paste a CSV first.")
             else:
-                if load_analysis(payload, "Your portfolio (not stored)",
-                                 name="Pasted CSV"):
+                if load_analysis(payload, "Your portfolio", name="Pasted CSV"):
+                    persist(ss.active)
                     st.rerun()
 
 
 # ---------------------------------------------------------------- render
+
+if ss.flash:
+    # Shown once, on the run AFTER the action: st.success before st.rerun() is wiped by the
+    # rerun, so the confirmation has to be carried across it in session state.
+    _kind, _text = ss.flash
+    ss.flash = None
+    {"success": st.success, "warning": st.warning}.get(_kind, st.info)(_text)
 
 {"ask": page_ask, "analysis": page_analysis, "holdings": page_holdings}[ss.page]()
 

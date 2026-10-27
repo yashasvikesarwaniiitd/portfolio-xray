@@ -405,16 +405,12 @@ async def portfolios_save(request: Request):
         return JSONResponse(status_code=400, content={"error": "Nothing to save."})
     # Validate before storing. A file the engine cannot read is not worth keeping, and
     # finding that out on LOAD would make a saved portfolio a trap rather than a shortcut.
+    # _csv_to_temp already runs the real parser; a second read here re-resolved every fund
+    # name against AMFI over the network, which an auto-save does on EVERY upload.
     try:
-        path = _csv_to_temp(csv_text)
+        _quiet_unlink(_csv_to_temp(csv_text))
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
-    try:
-        agent.read_portfolio(path)
-    except ValueError as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
-    finally:
-        _quiet_unlink(path)
 
     pid = storage.save(key, str(body.get("name") or "Portfolio"), csv_text)
     if not pid:
@@ -435,6 +431,58 @@ def portfolios_load(pid: str, request: Request):
         # them would confirm that an id exists to someone holding the wrong key.
         return JSONResponse(status_code=404, content={"error": "Not found."})
     return got
+
+
+@app.put("/portfolios/{pid}")
+async def portfolios_update(pid: str, request: Request):
+    """Replace a saved portfolio's contents and/or rename it, in place."""
+    if not storage.configured():
+        return JSONResponse(status_code=503, content={"error": "Saving is not switched on."})
+    body = await request.json()
+    name = body.get("name")
+    csv_text = body.get("csv_text")
+    if csv_text is not None:
+        try:
+            _quiet_unlink(_csv_to_temp(str(csv_text)))
+        except ValueError as e:
+            return JSONResponse(status_code=400, content={"error": str(e)})
+    ok = storage.update(_owner(request), pid,
+                        name=None if name is None else str(name),
+                        csv_text=None if csv_text is None else str(csv_text))
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": "Not found."})
+    return {"updated": True}
+
+
+@app.post("/merge")
+async def merge_portfolio(request: Request):
+    """Fold an uploaded file into an existing portfolio's text, without double-counting.
+
+    Stateless on purpose: the browser already holds the portfolio's text, so the server
+    needs neither storage nor an owner key to do this, and it works with saving switched
+    off. It returns the merged text and a report of what actually changed, and does NOT
+    analyse - the caller sends the result to /analysis, which keeps this call free of any
+    market-data network traffic.
+    """
+    body = await request.json()
+    existing = str(body.get("existing_csv") or "")
+    incoming = str(body.get("incoming_csv") or "")
+    if not incoming.strip():
+        return JSONResponse(status_code=400, content={"error": "The new file is empty."})
+    try:
+        import portfolio_merge
+        merged, report = portfolio_merge.merge(existing, incoming)
+        # Validate the RESULT the way the engine will read it, so a merge that produces
+        # something unreadable fails here with a reason rather than at analysis time.
+        _quiet_unlink(_csv_to_temp(merged))
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    if len(merged.encode("utf-8")) > storage.MAX_CSV_BYTES:
+        return JSONResponse(status_code=400, content={
+            "error": "This portfolio would be larger than the "
+                     f"{storage.MAX_CSV_BYTES // 1000}KB limit once merged."})
+    return {"csv_text": merged, "report": report,
+            "summary": portfolio_merge.describe(report)}
 
 
 @app.delete("/portfolios/{pid}")
