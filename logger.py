@@ -132,10 +132,17 @@ def log_query(ts: str, category: str, tools: list, usage: Usage,
 
 
 def summarize(path: str = DB_PATH) -> dict:
-    """Aggregate stats for a quick 'cost per query / latency' readout."""
+    """Aggregate stats for a quick 'cost per query / latency' readout.
+    The file existing does not mean `query_log` does: the Investigator's run store
+    creates xray.db too, so an agent run (or `xray_agent history`) before the first
+    chat leaves a db with only investigation_* in it. Absent table == nothing logged."""
     if not os.path.exists(path):
         return {"queries": 0}
     with sqlite3.connect(path) as conn:
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='query_log'"
+        ).fetchone():
+            return {"queries": 0}
         row = conn.execute(
             "SELECT COUNT(*), AVG(est_cost_usd), AVG(latency_ms), MAX(latency_ms), "
             "SUM(est_cost_usd) FROM query_log"

@@ -714,3 +714,17 @@ def test_the_query_log_records_no_portfolio_content():
                      "output_tokens", "est_cost_usd", "latency_ms"}
     for leaky in ("question", "query", "answer", "message", "holdings", "portfolio"):
         assert leaky not in names
+
+
+def test_stats_survives_a_db_that_only_the_investigator_has_written():
+    """/stats 500'd on a fresh checkout. summarize() guarded on the FILE existing, but
+    the Investigator's run store creates xray.db too — so one `xray_agent history` call
+    before the first chat leaves a db with investigation_runs and no query_log, and the
+    aggregate raised `no such table`. Absent table means nothing logged, not a crash."""
+    import logger
+    import sqlite3, tempfile, os
+    f = os.path.join(tempfile.mkdtemp(), "t.db")
+    with sqlite3.connect(f) as conn:            # what the run store leaves behind
+        conn.execute("CREATE TABLE investigation_runs (id INTEGER PRIMARY KEY)")
+    assert os.path.exists(f)
+    assert logger.summarize(f) == {"queries": 0}
