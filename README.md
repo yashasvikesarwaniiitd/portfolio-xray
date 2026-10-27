@@ -248,11 +248,14 @@ manual targets: `make evals-full` (assistant), `make evals-agent` (~₹1.2, all 
 | Investigation (the agent: plan → tools → verify → report) | **₹0.11–0.25** | 10–20s |
 | Chat turn (analytics, tools + synthesis) | **₹0.145** | ~12s |
 | Cited news answer (fetch → judge → synth) | **₹0.110** | ~8s |
-| Full AI health report (~10 guarded insight calls) | ₹4.56 ◇ | ~1–2 min |
+| Full AI health report (~10 guarded insight calls) | ₹0.27 ◇ | ~1–2 min |
 
-◇ _the only figure not re-measured after the Haiku 5.5 migration; it still shows its
-Haiku 4.5 value. The others fell 5–10×. A proportional guess would probably be about
-right, and it would still be a guess._
+◇ _a single sample, where every other row rests on many runs: one report generated
+against the deployed instance and read back from its own SQLite log
+(`avg_report_cost_inr`, n=1). It replaces ₹4.56 — the Haiku 4.5 figure this row carried
+until it was finally re-measured, a 17× fall that sits alongside the 27× on the eval
+cases. Measured, not scaled: the guess would have been close and still a guess. The
+portfolio behind it is the poisoned-name test fixture, so a larger book may cost more._
 
 Everything runs on **Haiku 5.5** ($0.10/$0.50 per MTok). The deployed demo rate-limits to
 20 chat turns and 3 reports per IP per day, with a dashboard kill switch.
