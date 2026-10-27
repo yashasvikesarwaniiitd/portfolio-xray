@@ -44,6 +44,7 @@ class Transaction:
     price: float
     symbol: str = ""
     name: str = ""
+    isin: str = ""          # identifies the instrument across exchanges; "" if not stated
 
     @property
     def signed_units(self) -> float:

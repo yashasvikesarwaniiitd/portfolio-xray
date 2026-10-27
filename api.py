@@ -243,7 +243,8 @@ async def overview(request: Request, file: UploadFile | None = None):
             _quiet_unlink(path)
 
 
-def _nifty_window_return(first_flow: date | None) -> dict | None:
+def _nifty_window_return(first_flow: date | None, holdings: list | None = None,
+                         rows: list | None = None) -> dict | None:
     """NIFTY 50 point-to-point return over the SAME window as the portfolio's life, so the
     dashboard can show a market reference next to XIRR. Labelled honestly in the UI: this is
     an index point-to-point figure, not a money-weighted one."""
@@ -258,9 +259,20 @@ def _nifty_window_return(first_flow: date | None) -> dict | None:
         years = max((d1 - d0).days / 365.0, 0.08)
         total = (end / start - 1) * 100
         annualised = ((end / start) ** (1 / years) - 1) * 100 if years >= 1 else total
-        return {"symbol": "NIFTY 50", "from": d0.isoformat(), "to": d1.isoformat(),
-                "total_pct": round(total, 2), "annualised_pct": round(annualised, 2),
-                "annualised": years >= 1}
+        out = {"symbol": "NIFTY 50", "from": d0.isoformat(), "to": d1.isoformat(),
+               "total_pct": round(total, 2), "annualised_pct": round(annualised, 2),
+               "annualised": years >= 1}
+        # The like-for-like figure: the SAME money on the SAME dates, put into the index
+        # instead. The point-to-point numbers above are kept, but they answer a different
+        # question (how did the index move since your first purchase) and are not comparable
+        # with a money-weighted return when most of the money went in recently.
+        if holdings is not None and rows is not None:
+            trade, terminal = agent._portfolio_flows(holdings, rows)
+            end = max((d for d, _ in terminal), default=d1)
+            same = agent.index_equivalent_xirr(trade, end, pmap)
+            if same is not None:
+                out["same_money_xirr_pct"] = same
+        return out
     except Exception:
         return None
 
@@ -319,9 +331,12 @@ async def analysis(request: Request, file: UploadFile | None = None):
             "snapshot": snap,
             "timeline": agent.portfolio_timeline(captures) if captures else [],
             "sections": sections,
-            "market": _nifty_window_return(first),
+            "market": _nifty_window_return(first, holdings, rows),
             "holdings_priced": snap["priced_count"],
-            "holdings_total": snap["total_count"],
+            # Open positions only: a holding you have fully sold is not unpriced, and counting
+            # it made "34 of 35 priced" read as a failure to value something.
+            "holdings_total": snap["total_count"] - snap["closed_count"],
+            "holdings_closed": snap["closed_count"],
             "skipped_rows": skipped,
         }
     except ValueError as e:

@@ -147,9 +147,10 @@ def holdings_with_weights(holdings: list[dict], level: str) -> list[dict]:
     for h in holdings:
         base = {"name": h["name"], "symbol": h["symbol"], "source": h["source"],
                 "type": h["type"], "market": h["market"], "risk": h["risk"],
-                "value": 0.0, "priced": False}
+                "value": 0.0, "priced": False, "closed": False}
         if level == "L2":
             r = agent.reconstruct_holding(h)
+            base["closed"] = r.get("status") == "closed"
             if r.get("status") == "priced":
                 base["value"] = r["current_value"]
                 base["priced"] = True
@@ -244,8 +245,12 @@ def section_diversification(rows: list[dict], overlap_penalty: float) -> dict:
         # The count the effective-bets figure is OVER, not the count of rows held. They
         # differ whenever something could not be priced, and "4.7 of 6" when only 5 rows
         # entered the maths claims a spread across a holding that was never in it.
-        "holdings_count": len(weights), "holdings_held": len(rows),
-        "unweighted_unpriced": sum(1 for r in rows if r["weight_pct"] <= 0),
+        "holdings_count": len(weights),
+        "holdings_held": sum(1 for r in rows if not r.get("closed")),
+        # A closed (fully sold) holding has no weight because it is gone, not because it
+        # could not be priced.
+        "unweighted_unpriced": sum(1 for r in rows
+                                   if r["weight_pct"] <= 0 and not r.get("closed")),
         "hhi": hhi, "effective_holdings": eff,
         "tiny_positions_under_half_pct": sum(1 for r in rows if 0 < r["weight_pct"] < 0.5),
         "asset_class_spread": ac_spread, "geo_spread": geo_spread,
@@ -257,7 +262,10 @@ def section_diversification(rows: list[dict], overlap_penalty: float) -> dict:
 
 
 def section_concentration(rows: list[dict], cache: dict, top_n: int = 8) -> dict:
-    top = sorted(rows, key=lambda r: r["weight_pct"], reverse=True)[:top_n]
+    # Only holdings that carry weight. A sold or unpriced holding has none, and listing it made
+    # "2 holdings hold 100% of your money" about a book with one open position.
+    top = sorted((r for r in rows if r["weight_pct"] > 0), key=lambda r: r["weight_pct"],
+                 reverse=True)[:top_n]
     cum = 0.0
     table = []
     for r in top:

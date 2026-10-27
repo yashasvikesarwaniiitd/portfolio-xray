@@ -356,6 +356,15 @@ _FX_CACHE: dict = {}
 def is_usd_denominated(source: str, symbol: str) -> bool:
     """True for instruments quoted in dollars: US-listed tickers and crypto pairs."""
     code = str(symbol or "").strip().upper()
+    if code.startswith("^"):
+        # An index level (^NSEI, ^GSPC) is not a price in a currency you hold, so there is
+        # nothing to convert. ^NSEI has no .NS/.BO suffix, so the rule below took it for a
+        # US-listed ticker and multiplied it by USD/INR: NIFTY 50 came back as ~2,160,000
+        # instead of ~22,750, and because the rupee weakened over the period the FX drift was
+        # baked into the index's return. The dashboard reported NIFTY +0.9% a year over a
+        # window in which it actually fell about 5% a year - the wrong sign, beside a
+        # portfolio return the reader was being asked to judge against it.
+        return False
     if source == "crypto" or code.endswith("-USD"):
         return True
     if source != "yfinance" or not code:
@@ -454,6 +463,10 @@ def _value_from_transactions(h: dict, include_breakdown: bool = False,
     try:
         start = min(t.date for t in trades) - timedelta(days=15)
         pmap = _price_map(h["source"], h["symbol"], start, date.today())
+        if not pmap and str(h["symbol"]).endswith(".NS"):
+            # Positions are priced on NSE (see to_holdings); a stock that trades only on BSE
+            # has no NSE series, so fall back to its BSE listing rather than call it unpriced.
+            pmap = _price_map(h["source"], h["symbol"][:-3] + ".BO", start, date.today())
         if not pmap:
             return {**base, "status": "unavailable",
                     "invested": round(h["total_invested"], 2),
@@ -612,10 +625,22 @@ def aggregate_snapshot(rows: list[dict]) -> dict:
     total_invested = sum(r["invested"] for r in priced)
     total_current = sum(r["current_value"] for r in priced)
     total_pnl = total_current - total_invested
+    # A fully sold holding is "closed", not "unpriceable". Counting its gross cost here told a
+    # reader that money they had already sold out of "can't be valued".
     unpriced_invested = sum(r.get("invested", 0.0) for r in rows
-                            if r.get("status") != "priced")
+                            if r.get("status") not in ("priced", "closed"))
+    # Profit already banked by selling. It was excluded from every total: a fully exited
+    # holding is "closed", not "priced", and a partly sold one carried its realised figure on
+    # its own row only. So the headline was unrealised P&L labelled as if it were the whole
+    # story, and a book that had booked gains looked worse than it was. Reported separately,
+    # never silently folded in, because the two mean different things.
+    realised = sum(r.get("realised_pnl") or 0.0 for r in rows
+                   if r.get("status") in ("priced", "closed"))
     return {
         "holdings": rows,
+        "total_realised_pnl": round(realised, 2),
+        "total_pnl_incl_realised": round(total_pnl + realised, 2),
+        "closed_count": sum(1 for r in rows if r.get("status") == "closed"),
         "priced_count": len(priced),
         "total_count": len(rows),
         "total_invested": round(total_invested, 2),
@@ -628,22 +653,79 @@ def aggregate_snapshot(rows: list[dict]) -> dict:
     }
 
 
-def _portfolio_xirr(holdings: list[dict], rows: list[dict]) -> "float | None":
-    """Whole-portfolio XIRR: pool every priced holding's SIP outflows with its current value
-    (dated to its price_date). Pure metrics.xirr does the solve. None if not computable."""
-    cashflows = []
+def _portfolio_flows(holdings: list[dict], rows: list[dict]) -> tuple:
+    """(trade_flows, terminal_flows): every dated cashflow, split into the money the investor
+    moved (buys negative, sale proceeds positive) and the closing value of what is still held.
+
+    A holding read from a broker statement contributes its REAL trades - actual dates, and
+    sale proceeds as positive inflows - and a fully exited holding contributes its flows with
+    no closing value, because the money it returned is part of what the portfolio earned.
+    This used to date every purchase to the 1st of its month and drop every sale, which
+    misstated a book with sells and with many same-month purchases. A SIP-sheet holding has
+    only monthly amounts, so it is still dated to the 1st.
+
+    Split, rather than one list, so the same trades can be replayed into an index.
+    """
+    trade, terminal = [], []
     for h, r in zip(holdings, rows):
+        if h.get("transactions") and r.get("status") in ("priced", "closed"):
+            as_of = date.fromisoformat(r["price_date"])
+            trade += [(t.date, -t.signed_value) for t in txn.sort_txns(h["transactions"])
+                      if t.date <= as_of]
+            if r.get("status") == "priced":
+                terminal.append((as_of, r["current_value"]))
+            continue
         if r.get("status") != "priced":
             continue
         pdate = date.fromisoformat(r["price_date"])
         for (y, m, amt) in h["inflows"]:
             if date(y, m, 1) <= pdate:
-                cashflows.append((date(y, m, 1), -amt))
-        cashflows.append((pdate, r["current_value"]))
+                trade.append((date(y, m, 1), -amt))
+        terminal.append((pdate, r["current_value"]))
+    return trade, terminal
+
+
+def _portfolio_xirr(holdings: list[dict], rows: list[dict]) -> "float | None":
+    """Whole-portfolio XIRR: every holding's dated cashflows pooled, with each open position's
+    current value as a closing inflow at its price date. None if not computable."""
+    trade, terminal = _portfolio_flows(holdings, rows)
+    cashflows = trade + terminal
     if len(cashflows) < 2:
         return None
     try:
         return round(metrics.xirr(cashflows) * 100, 2)
+    except ValueError:
+        return None
+
+
+def index_equivalent_xirr(trade_flows: list, end: date, index_prices: dict) -> "float | None":
+    """What the SAME money, on the SAME dates, would have returned in an index.
+
+    Every purchase buys index units at that day's level and every sale sells them; the units
+    left are valued at the final level. This is the like-for-like benchmark for a
+    money-weighted return. Comparing XIRR with the index's point-to-point move since the
+    FIRST purchase is not: a book whose money mostly went in recently has had that money
+    exposed for months, not years, so a multi-year index figure says nothing about whether
+    the timing and the choices paid off.
+    """
+    if not trade_flows or not index_prices:
+        return None
+    last_day = max(index_prices)
+    units = 0.0
+    for d, amount in sorted(trade_flows):
+        px = metrics.nav_on_or_before(index_prices, d, max_back=10)
+        if not px:
+            continue                      # before the index series begins; cannot be replayed
+        units += -amount / px
+    if units <= 0:
+        return None
+    flows = [(d, a) for d, a in trade_flows
+             if metrics.nav_on_or_before(index_prices, d, max_back=10)]
+    flows.append((end, units * index_prices[last_day]))
+    if len(flows) < 2:
+        return None
+    try:
+        return round(metrics.xirr(flows) * 100, 2)
     except ValueError:
         return None
 
@@ -1101,6 +1183,48 @@ def search_fund(query: str, limit: int = 10) -> str:
                 "the user which variant this is; the order below is not meaningful.")
     return json.dumps({"query": query, "matches": hits[:limit], "total_matches": len(hits),
                        "note": note})
+
+
+def scheme_master() -> dict:
+    """{AMFI code: scheme name} for every scheme, fetched once per process."""
+    global _SCHEME_CODES
+    if _SCHEME_CODES is None:
+        _SCHEME_CODES = _mf().get_scheme_codes() or {}
+    return _SCHEME_CODES
+
+
+_NAV_HISTORY: dict = {}
+
+
+def nav_history(code) -> dict:
+    """{date: NAV} for one AMFI scheme, cached for the life of the process.
+
+    Cached because verifying a fund tests several candidate schemes against it, and the same
+    schemes come up again on every analysis, report and chat turn. A failed or empty fetch is
+    NOT cached, so a transient AMFI hiccup does not poison the rest of the process.
+    """
+    code = str(code)
+    if code in _NAV_HISTORY:
+        return _NAV_HISTORY[code]
+    raw = _mf().get_scheme_historical_nav(code) or {}
+    out = {}
+    for d in raw.get("data") or []:
+        try:
+            out[datetime.strptime(d["date"], "%d-%m-%Y").date()] = float(d["nav"])
+        except (ValueError, KeyError, TypeError):
+            continue
+    if out:
+        _NAV_HISTORY[code] = out
+    return out
+
+
+def scheme_full_name(code) -> str:
+    """The scheme's full name, including its plan and option, from the per-scheme endpoint
+    (the master list often drops them)."""
+    try:
+        return str((_mf().get_scheme_details(str(code)) or {}).get("scheme_name") or "").strip()
+    except Exception:
+        return ""
 
 
 def _disambiguate_plans(hits: list[dict], max_lookups: int = 8) -> bool:

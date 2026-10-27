@@ -1049,7 +1049,9 @@ with st.sidebar:
         st.markdown(
             f'<div class="rail-card"><div class="t">{_html.escape(ss.source_label or "")}'
             f'</div><div class="b">{ss.analysis["holdings_priced"]} of '
-            f'{ss.analysis["holdings_total"]} holdings priced · input tier '
+            f'{ss.analysis["holdings_total"]} holdings priced'
+            f'{" · " + str(ss.analysis["holdings_closed"]) + " sold" if ss.analysis.get("holdings_closed") else ""}'
+            f' · input tier '
             f'{ss.analysis["level"]}</div></div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="rail-card"><div class="t">Nothing loaded yet</div>'
@@ -1282,29 +1284,50 @@ def page_analysis() -> None:
     # --- KPI row: value+sparkline · XIRR vs market · effective bets · fees -----------
     pnl_cls = "up" if snap["total_pnl_abs"] >= 0 else "down"
     arrow = "▲" if snap["total_pnl_abs"] >= 0 else "▼"
+    # The headline is UNREALISED: what the positions you still hold are worth against what
+    # they cost. Profit already banked by selling is a different number, so it is shown on its
+    # own line beside it rather than folded in (which would hide it) or left out (which made a
+    # book that had booked gains look worse than it was).
+    realised = snap.get("total_realised_pnl") or 0
+    real_line = ""
+    if realised:
+        total = snap.get("total_pnl_incl_realised", snap["total_pnl_abs"] + realised)
+        real_line = (
+            f'<div class="k-foot" style="margin-top:8px">'
+            f'{"+" if realised >= 0 else "−"}{inr(abs(realised))} already realised from '
+            f'sales · <span class="{"up" if total >= 0 else "down"}">'
+            f'{"+" if total >= 0 else "−"}{inr(abs(total))} in total</span></div>')
     k_value = (
         f'<div class="kpi"><div class="k-label">What it\'s worth today</div>'
         f'<div class="k-big">{inr(snap["total_current_value"])}</div>'
         f'<div class="k-note {pnl_cls}">{arrow} {inr(abs(snap["total_pnl_abs"]))} '
-        f'<span class="muted">against {inr(snap["total_invested"])} invested</span></div>'
+        f'<span class="muted">unrealised, on {inr(snap["total_invested"])} you still '
+        f'hold</span></div>{real_line}'
         f'<div style="margin-top:auto;padding-top:16px">'
         f'{sparkline(a.get("timeline") or [], height=44, dark=False)}</div></div>')
 
     mk = a.get("market") or {}
     xirr = snap.get("portfolio_xirr_pct")
-    ref = mk.get("annualised_pct")
+    # Like-for-like when the server could compute it: the SAME purchases and sales replayed
+    # into NIFTY 50. The point-to-point move since the first purchase is only a fallback - it
+    # is not comparable with a money-weighted return when most of the money went in recently.
+    same = mk.get("same_money_xirr_pct")
+    ref = same if same is not None else mk.get("annualised_pct")
     bar_you = min(max((xirr or 0) / 25 * 100, 2), 100)
     bar_mk = min(max((ref or 0) / 25 * 100, 2), 100)
     k_xirr = (
         f'<div class="kpi"><div class="k-label">Your return a year (XIRR)</div>'
         f'<div class="k-num">{pct(xirr)}</div>'
-        f'<div class="k-note">NIFTY 50 did {pct(ref)} over the same window</div>'
+        f'<div class="k-note">{"Your same money in NIFTY 50: " + pct(ref) + " a year" if same is not None else "NIFTY 50 did " + pct(ref) + " over the same window"}</div>'
         f'<div class="duo"><span>You</span><div class="track">'
         f'<div style="width:{bar_you:.0f}%"></div></div>'
         f'<span>NIFTY 50</span><div class="track idx">'
         f'<div style="width:{bar_mk:.0f}%"></div></div></div>'
-        f'<div class="k-foot">Yours is money-weighted (your SIP timing); the index '
-        f'line is point-to-point.</div></div>')
+        + (f'<div class="k-foot">Both are money-weighted: the index line puts your own '
+           f'purchases and sales, on their own dates, into NIFTY 50 instead.</div></div>'
+           if same is not None else
+           f'<div class="k-foot">Yours is money-weighted (your SIP timing); the index '
+           f'line is point-to-point.</div></div>'))
 
     effn = div.get("effective_holdings")
     # holdings_count is what the figure is computed OVER, which is not always what you
@@ -1406,7 +1429,8 @@ def page_analysis() -> None:
         if snap["unpriced_invested"]:
             cards.append(insight(
                 "Some holdings can't be valued", inr(snap["unpriced_invested"]),
-                f'{snap["total_count"] - snap["priced_count"]} holding(s) have no '
+                f'{snap["total_count"] - snap["priced_count"] - snap.get("closed_count", 0)} '
+                f'holding(s) have no '
                 f'reconstructable price — a manual basket, or listed after your SIP dates. '
                 f'They are excluded from every total rather than guessed.', "MEDIUM"))
         score = div.get("diversification_score")
@@ -1485,6 +1509,29 @@ def page_analysis() -> None:
                              "Direct %": st.column_config.NumberColumn(format="%.2f"),
                              "Through funds %": st.column_config.NumberColumn(format="%.2f"),
                          })
+        st.write("")
+
+    # --- how the funds were matched ---------------------------------------------------
+    # A fund statement names a scheme; pricing it needs an AMFI scheme code, which is a
+    # judgement made on the reader's behalf. Choosing the wrong scheme priced two funds on
+    # index funds and turned a roughly flat book into a Rs 1 lakh "loss" without any sign
+    # that anything was off. So the match, and whether it was checked against the NAVs the
+    # statement itself recorded, is shown rather than assumed.
+    matches = [n for n in (a.get("skipped_rows") or [])
+               if "AMFI" in n or "not pricing it" in n or "could not resolve" in n]
+    if matches:
+        checked = sum(1 for n in matches if "[verified:" in n)
+        with st.expander(f"How your funds were matched ({checked} of {len(matches)} "
+                         "verified against your statement)"):
+            for n in matches:
+                ok = "[verified:" in n
+                st.markdown(
+                    f'<div style="font-size:13px;line-height:1.55;color:var(--ink2);'
+                    f'margin:0 0 8px">{"✓" if ok else "⚠"} {_html.escape(n)}</div>',
+                    unsafe_allow_html=True)
+            st.caption("Each fund is priced only against an AMFI scheme whose NAVs match the "
+                       "purchases on your statement. One that does not match is left unpriced "
+                       "rather than guessed.")
         st.write("")
 
     # --- holdings table -------------------------------------------------------------

@@ -114,7 +114,7 @@ uv run pytest test_metrics.py test_agent.py test_report.py test_xray_agent.py \
   -m "not regression" -q
 ```
 
-**347 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
+**395 hermetic tests, no network, no API key** — the whole agent loop (budgets, retries,
 verification, prompt injection, provider translation) is tested as deterministic logic.
 266 pass and one skips unless the optional `tracing` extra is installed
 (`uv sync --extra tracing`).
@@ -190,7 +190,7 @@ question ─► ROUTER GATE ──advice──► canned refusal      (REFUSED, 
 ```
 
 Clean-architecture layering (`domain` / `application` / `ports` / `adapters`) is what lets
-the whole loop run against a scripted model and canned tools: **347 hermetic tests, no
+the whole loop run against a scripted model and canned tools: **395 hermetic tests, no
 network, no API key.**
 
 SQLite logs every query's tokens, cost and latency, and every CLI investigation's outcome,
@@ -343,6 +343,17 @@ built.
   selected one, the analyst included. With saving on they reopen after a refresh (below);
   without it they live in session state only. Switching clears the chat thread, because
   figures from one book have no business sitting under another's heading.
+- **Every statement figure is checked against the statement itself.** A fund is priced only
+  against an AMFI scheme whose NAV on each purchase date equals the NAV your own statement
+  recorded (a wrong scheme matched 0 of 14 purchases; the right one 14 of 14), which also
+  separates Direct from Regular and Growth from IDCW. A fund that cannot be verified is shown
+  as unpriced, never guessed, and the dashboard lists how each fund was matched. A stock
+  bought on NSE and BSE is one position (grouped by ISIN, priced on NSE). The headline is
+  unrealised P&L on what you still hold, with realised profit from sales beside it. The
+  benchmark replays your own dated purchases and sales into NIFTY 50, instead of comparing a
+  money-weighted return with the index's point-to-point move. Found by reconciling a real
+  statement pair to an independent recomputation: the app showed a loss roughly a dozen times
+  the real one, almost all of it two funds priced on the wrong scheme.
 - **CSV or Excel.** Both upload paths take `.csv`, `.xlsx` and `.xlsm`. A workbook is
   converted server-side into the text a CSV export would have been, so merging, saving,
   analysis and the chat are unchanged. Each sheet is judged on its own: a cover or summary

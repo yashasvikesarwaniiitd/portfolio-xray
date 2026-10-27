@@ -37,6 +37,7 @@ FIELD_SYNONYMS = {
              "date time", "datetime", "date", "txn date", "settlement date", "value date"],
     "symbol": ["symbol", "scrip", "scrip code", "ticker", "instrument", "stock symbol",
                "tradingsymbol", "trading symbol", "nse symbol", "bse code", "isin"],
+    "isin": ["isin number", "isin code", "isin"],
     "name": ["stock name", "company name", "scheme name", "security name", "instrument name",
              "scrip name", "fund name", "name", "particulars", "description"],
     "side": ["transaction type", "trade type", "order type", "buy sell", "buy or sell",
@@ -174,10 +175,12 @@ def normalise_symbol(symbol: str, name: str = "", exchange: str = "") -> tuple:
     return sym, ""
 
 
+_ISIN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+_VENUE_SUFFIX = re.compile(r"\.(NS|BO)$")
 _ETFISH = re.compile(r"(etf|bees|beees|exchange traded)", re.I)
 
 
-def infer_instrument(symbol: str, source: str, name: str = "") -> tuple:
+def infer_instrument(symbol: str, source: str, name: str = "", isin: str = "") -> tuple:
     """(type, market) for a holding the statement did not classify.
 
     A SIP sheet states both in its own columns. A broker statement states neither, so every
@@ -198,7 +201,12 @@ def infer_instrument(symbol: str, source: str, name: str = "") -> tuple:
         return "Crypto", "Global"
     if not sym and not source:
         return "", ""
-    etf = bool(_ETFISH.search(name or "")) or sym.endswith("BEES.NS")
+    # An Indian ISIN says what the instrument is: INE... is a company's equity, INF... is an
+    # investment fund - which for something traded on an exchange means an ETF. Groww names
+    # ETFs "HDFCAMC - HDFCSML250" or "NIPPONAMC - NETFSILVER", with no "ETF" in them, so the
+    # name heuristic alone filed those as ordinary shares and a book's ETFs counted as stocks.
+    etf = (str(isin or "").upper().startswith("INF") or bool(_ETFISH.search(name or ""))
+           or sym.endswith("BEES.NS"))
     typ = "ETF" if etf else "Share"
     if sym.endswith((".NS", ".BO")):
         return typ, "India"
@@ -317,6 +325,15 @@ def _row_to_txn(rec: dict, mapping: dict):
         price = abs(amount) / abs(qty)
     if price is None or price <= 0:
         raise ValueError("no usable price (and none derivable from amount / quantity)")
+    # When the statement states BOTH the unit price and the amount, the amount is the cash that
+    # actually moved and the price is a rounded quote (a mutual-fund NAV is printed to 2dp).
+    # units x NAV is therefore a slightly different number from what was paid, and across a
+    # long SIP history the rounding accumulates: Rs 89 on a Rs 7.8 lakh book here. Use the
+    # amount - but only when the two agree to within 1%, so a row whose "amount" means
+    # something else (a fee-inclusive total, a different currency) cannot silently rewrite
+    # the price.
+    if amount and qty and abs(abs(amount) - abs(qty) * price) <= 0.01 * abs(amount):
+        price = abs(amount) / abs(qty)
     if side is None:
         raise ValueError("could not tell buy from sell, and the quantity is unsigned")
 
@@ -327,8 +344,11 @@ def _row_to_txn(rec: dict, mapping: dict):
 
     exchange = str(val("exchange") or "")
     symbol, _ = normalise_symbol(symbol_raw or name, name, exchange)
+    isin = str(val("isin") or "").strip().upper()
+    if not _ISIN.match(isin):
+        isin = ""
     return Transaction(date=when, side=side, units=abs(qty), price=abs(price),
-                       symbol=symbol or "", name=name or symbol_raw)
+                       symbol=symbol or "", name=name or symbol_raw, isin=isin)
 
 
 def to_holdings(txns: list) -> list:
@@ -339,17 +359,30 @@ def to_holdings(txns: list) -> list:
     is present, because real trade dates and executed prices beat reconstructing units from
     a monthly amount.
     """
+    # ONE POSITION PER INSTRUMENT, not per venue. A stock bought on NSE and again on BSE is one
+    # holding in a demat account, but the symbol differs (TCS.NS vs TCS.BO), so grouping on the
+    # symbol made two holdings out of it. That doubled the holding count, split the position's
+    # P&L and XIRR across two rows, and - because each row was priced on its own exchange's
+    # last quote, a day apart - valued the same share at two different prices. The ISIN is the
+    # one identifier both venues share, so group on it, falling back to the bare ticker.
     grouped: dict = {}
     for t in txns:
-        key = t.symbol or t.name
+        root = _VENUE_SUFFIX.sub("", t.symbol or "")
+        key = t.isin or root or t.name
         grouped.setdefault(key, []).append(t)
 
     holdings = []
     for key, group in grouped.items():
         group.sort(key=lambda t: t.date)
-        symbol, source = normalise_symbol(group[0].symbol, group[0].name)
-        symbol = group[0].symbol or symbol      # the suffix was resolved per-row already
-        inferred = infer_instrument(symbol, source, group[0].name)
+        # Price on NSE when the instrument has been traded there: it is the deeper market and
+        # the one yfinance carries most reliably. BSE only if that is all there is.
+        symbols = [t.symbol for t in group if t.symbol]
+        nse = [x for x in symbols if x.endswith(".NS")]
+        chosen = (nse or symbols or [""])[0]
+        symbol, source = normalise_symbol(chosen, group[0].name)
+        symbol = chosen or symbol
+        isin = next((t.isin for t in group if t.isin), "")
+        inferred = infer_instrument(symbol, source, group[0].name, isin)
         gross_buys = sum(t.value for t in group if t.side == BUY)
         holdings.append({
             "name": group[0].name or key,

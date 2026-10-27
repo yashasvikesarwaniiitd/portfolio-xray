@@ -456,7 +456,11 @@ def test_purchase_and_redemption_are_understood_as_buy_and_sell():
          "3305.00", "2026-09-15"],
     ]))
     assert [t.side for t in txns] == [BUY, SELL]
-    assert txns[0].units == 85.432 and txns[0].price == 58.52
+    assert txns[0].units == 85.432
+    # The price is the cash actually paid per unit (5000 / 85.432), not the 2dp NAV the
+    # statement prints, which agrees with it to within the rounding of that NAV.
+    assert txns[0].price == pytest.approx(5000.0 / 85.432)
+    assert txns[0].price == pytest.approx(58.52, rel=2e-4)
 
 
 # --- splitting the scheme name ---------------------------------------------------------

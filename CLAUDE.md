@@ -29,7 +29,23 @@ reconstructed, and it can express SELLS, which the SIP sheet cannot.
   reported as unmatched, never given a zero cost basis.
 - Sale proceeds are POSITIVE cashflows for XIRR.
 - MF scheme names resolve to AMFI codes by splitting core/plan/option; contradicting the
-  stated plan is penalised, never defaulted to Direct Growth.
+  stated plan is penalised, never defaulted to Direct Growth. A name match is only a
+  CANDIDATE: it is accepted only if the scheme's NAVs match the NAVs the statement itself
+  recorded on its purchase dates (`fund_resolver.nav_match`). A fund that cannot be verified
+  is left unpriced, never priced on a guess. A name-only match once priced a fund on a
+  different (index) fund whose NAV was ~30x smaller and fabricated a ~96% loss on it.
+  Candidates come from contiguous containment on the compacted name, so "Small Cap" and
+  "SmallCap" are one string and an index fund that merely contains the words is excluded.
+- One position per instrument, not per venue: statement rows are grouped by ISIN (falling
+  back to the bare ticker), so an NSE and a BSE fill of one stock are a single holding priced
+  once on NSE. The ISIN prefix also types it (INE = share, INF = ETF/fund).
+- The headline P&L is UNREALISED (open lots at FIFO cost). Realised P&L from sales is
+  reported beside it, never folded in or dropped. A fully sold holding is "closed", not
+  "unpriced". Portfolio XIRR is built from every real dated flow, sales as inflows.
+- The benchmark is like-for-like: the same dated flows replayed into NIFTY 50
+  (`agent.index_equivalent_xirr`). Index levels (symbols starting `^`) are never converted
+  to rupees - doing so once reported the index as rising over a window in which it fell.
+- Cost uses the statement's amount paid when it agrees with units x price to within 1%.
 - A portfolio is a sequence of PARTS (`portfolio_merge.PART_DELIM`), one per source file,
   read by their own parser and combined by `agent.read_portfolio`. Adding a file merges
   it: statement rows dedupe on a hash of all column values (multiset, so two identical
