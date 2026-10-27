@@ -265,12 +265,15 @@ cases. Measured, not scaled: the guess would have been close and still a guess. 
 portfolio behind it is the poisoned-name test fixture, so a larger book may cost more._
 
 ◆ _₹0.145 was the many-run average of the old `agent.turn` loop, which no longer exists.
-The first analytics turn through the Investigator cost **₹0.2223** (27,487 input tokens,
-1,735 output, 12.9s) — about 1.5× more, for the reason §9 of ARCHITECTURE gives: every tool
-result stays in the history and is re-sent, and the loop also carries a larger system prompt
-and 17 tool schemas. That is the price of the budget, the evidence ledger and the verifier
-on a path that previously had none of them. One sample against the old figure's many, so
-both are shown rather than the new one quietly replacing the old._
+Two analytics turns through the Investigator: **₹0.2223** locally (27,487 input tokens,
+1,735 output, 3 tools, 12.9s) and **≈₹0.19** against the deployed instance (2 tools, 12.5s,
+read back from its `/stats`). So roughly 1.3–1.5× the old figure, and it moves with how many
+tools the model chooses — which is the point of a loop that chooses. The increase is the one
+§9 of ARCHITECTURE predicts: every tool result stays in the history and is re-sent, and the
+loop also carries a larger system prompt and 17 tool schemas. That is the price of a budget,
+an evidence ledger and a verifier on a path that previously had none of them. Two samples
+against the old figure's many, so both are shown rather than the new one quietly replacing
+the old._
 
 Everything runs on **Haiku 5.5** ($0.10/$0.50 per MTok). The deployed demo rate-limits to
 20 chat turns and 3 reports per IP per day, with a dashboard kill switch.
