@@ -407,6 +407,14 @@ def portfolios_list(request: Request):
     return {"enabled": True, "portfolios": storage.list_for(_owner(request))}
 
 
+@app.get("/storage/status")
+def storage_status():
+    """Whether saving can actually work, and a coarse reason if not. `enabled` on /portfolios
+    only says the connection string is SET; this says whether it WORKS. Labels only - see
+    storage.diagnose for why no error text is returned."""
+    return storage.diagnose()
+
+
 @app.post("/portfolios")
 async def portfolios_save(request: Request):
     if not storage.configured():

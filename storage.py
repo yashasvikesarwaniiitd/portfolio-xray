@@ -97,6 +97,40 @@ def init_db() -> bool:
         return False
 
 
+def diagnose() -> dict:
+    """Is the database actually reachable, and if not, what KIND of problem is it?
+
+    Every other function here swallows its errors on purpose, so a bad connection string
+    looks exactly like "no portfolios saved yet" - the app reports storage as ON (the
+    variable is set) while quietly saving nothing. That is the worst failure to debug from
+    outside. This returns a coarse category and never the message itself: a driver error can
+    contain the host or user name, and this is served to anyone who asks, so only a fixed
+    label leaves the process. The password is never in these messages and never printed.
+    """
+    if not configured():
+        return {"reachable": False, "problem": "not_configured"}
+    try:
+        with _connect() as conn:
+            conn.execute("SELECT 1")
+            has_table = conn.execute(
+                "SELECT to_regclass('public.saved_portfolio') IS NOT NULL").fetchone()[0]
+        return {"reachable": True, "problem": None if has_table else "table_missing"}
+    except Exception as e:
+        msg = f"{type(e).__name__} {e}".lower()
+        for needle, label in (
+                ("password authentication", "bad_password"),
+                ("tenant or user not found", "wrong_user_or_project"),
+                ("translate host", "unknown_host"), ("resolve", "unknown_host"),
+                ("name or service", "unknown_host"),
+                ("network is unreachable", "ipv6_only_host_use_session_pooler"),
+                ("timeout", "timeout"), ("timed out", "timeout"),
+                ("ssl", "ssl"), ("invalid", "malformed_connection_string"),
+                ("missing", "malformed_connection_string")):
+            if needle in msg:
+                return {"reachable": False, "problem": label}
+        return {"reachable": False, "problem": "other:" + type(e).__name__}
+
+
 def _prune(conn) -> None:
     conn.execute("DELETE FROM saved_portfolio WHERE expires_at < now()")
 

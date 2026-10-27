@@ -167,3 +167,21 @@ def test_one_browser_cannot_update_anothers_portfolio():
         assert [r["id"] for r in storage.list_for(alice)] == [pid], "updated in place"
     finally:
         storage.delete(alice, pid)
+
+
+def test_diagnose_names_the_kind_of_failure_without_leaking_the_message(monkeypatch):
+    monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert storage.diagnose() == {"reachable": False, "problem": "not_configured"}
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://user:secretpw@127.0.0.1:1/doesnotexist")
+    monkeypatch.setattr(storage, "CONNECT_TIMEOUT", 1)
+    d = storage.diagnose()
+    assert d["reachable"] is False and d["problem"]
+    assert "secretpw" not in str(d) and "127.0.0.1" not in str(d)
+
+
+@pytest.mark.regression
+@requires_db
+def test_diagnose_reports_a_working_database_as_reachable():
+    assert storage.init_db()
+    assert storage.diagnose() == {"reachable": True, "problem": None}
