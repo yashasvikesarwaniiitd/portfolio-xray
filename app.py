@@ -290,8 +290,8 @@ header[data-testid="stHeader"] { background: transparent; }
 .sw-l { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: .12em;
   text-transform: uppercase; color: var(--ink3); }
 .block-container [class*="st-key-pf_"] .stButton > button {
-  min-height: 36px; border-radius: 999px; font-size: 13.5px; font-weight: 500;
-  border: 1px solid var(--line2); background: var(--bg1); color: var(--ink2);
+  min-height: 36px; border-radius: 999px 0 0 999px; font-size: 13.5px; font-weight: 500;
+  border: 1px solid var(--line2); border-right: 0; background: var(--bg1); color: var(--ink2);
 }
 .block-container [class*="st-key-pf_"] .stButton > button:hover {
   background: var(--bg2); color: var(--ink1); border-color: var(--ink4);
@@ -305,12 +305,26 @@ header[data-testid="stHeader"] { background: transparent; }
 .block-container [class*="st-key-pf_"] .stButton > button[kind="primary"]:hover {
   background: #E2FF7A; color: var(--lime-ink);
 }
-.block-container [class*="st-key-pf_del"] .stButton > button {
-  min-height: 32px; border-radius: 8px; font-size: 12.5px; color: var(--ink3);
-  background: transparent; border: 1px solid var(--line);
+/* The close segment is fused to the right edge of its pill: the pill's right corners are
+   squared above and this one's left corners are squared here, so the pair reads as one
+   control with a thin divider rather than two buttons side by side. */
+/* Descendant, not child, selector: a button with a `help` tooltip is wrapped in an extra
+   element, so `.stButton > button` silently matched nothing and the close segment kept
+   Streamlit's default shape. The label-only pill has no tooltip, which is why its rule works. */
+.block-container [class*="st-key-pfx_"] .stButton button {
+  min-height: 36px; border-radius: 0 999px 999px 0; padding: 0 10px 0 6px;
+  border: 1px solid var(--line2); border-left: 1px solid rgba(0,0,0,.22);
+  background: var(--bg1); color: var(--ink3);
 }
-.block-container [class*="st-key-pf_del"] .stButton > button:hover {
-  color: var(--coral); border-color: var(--coral); background: transparent;
+.block-container [class*="st-key-pfx_"] .stButton button:hover {
+  background: var(--bg2); color: var(--coral); border-color: var(--ink4);
+}
+.block-container [class*="st-key-pfx_"] .stButton button[kind="primary"] {
+  background: var(--lime); color: var(--lime-ink); border-color: var(--lime);
+  border-left: 1px solid rgba(0,0,0,.22);
+}
+.block-container [class*="st-key-pfx_"] .stButton button[kind="primary"]:hover {
+  background: #E2FF7A; color: #B42318;
 }
 /* The uploader is the SECOND of two equal ways to add a portfolio, so it is sized like
    the first rather than left as Streamlit's small inset button in a tall dropzone. */
@@ -653,31 +667,54 @@ def portfolio_switcher() -> None:
     names = list(ss.portfolios)
     st.markdown('<div class="sw"><span class="sw-l">Portfolio</span></div>',
                 unsafe_allow_html=True)
-    # Fixed-width columns so pills keep a readable size rather than stretching to fill the
-    # row: two portfolios should not become two half-page buttons. Remove takes the slot
-    # straight after the last pill, so it reads as part of the same control instead of
-    # claiming a row of its own above the page title.
-    per_row = 4
-    cells = names + (["·remove·"] if len(names) > 1 else [])
-    for start in range(0, len(cells), per_row):
-        chunk = cells[start:start + per_row]
-        cols = st.columns(per_row)
-        for col, name in zip(cols, chunk):
+    # Each portfolio is ONE pill with a close segment fused to it, so removing a book is
+    # done on the book itself and works with a single portfolio loaded. It used to be a
+    # separate "Remove" button that only appeared once there were TWO or more, so a person
+    # with one portfolio - the usual case, and the one they most often want to start over
+    # from - had no way to remove it at all.
+    #
+    # Fixed-width groups rather than stretching to the row: two portfolios should not become
+    # two half-page pills.
+    per_row = 3
+    for start in range(0, len(names), per_row):
+        chunk = names[start:start + per_row]
+        outer = st.columns(per_row)
+        for i, (col, name) in enumerate(zip(outer, chunk), start=start):
             with col:
-                if name == "·remove·":
-                    saved_copy = bool((ss.portfolios.get(ss.active) or {}).get("pid"))
-                    if st.button("Remove", key="pf_del", use_container_width=True,
-                                 icon=":material/close:",
-                                 help=(f"Delete “{ss.active}”, including its saved copy"
-                                       if saved_copy else
-                                       f"Remove “{ss.active}” from this session")):
-                        forget_portfolio(ss.active)
-                        activate_portfolio(next(iter(ss.portfolios)))
+                is_active = name == ss.active
+                pill, close = st.columns([6, 1], gap=None)
+                with pill:
+                    if st.button(name, key=f"pf_{i}", use_container_width=True,
+                                 type="primary" if is_active else "secondary"):
+                        activate_portfolio(name)
                         st.rerun()
-                elif st.button(name, key=f"pf_{name}", use_container_width=True,
-                               type="primary" if name == ss.active else "secondary"):
-                    activate_portfolio(name)
-                    st.rerun()
+                with close:
+                    saved_copy = bool((ss.portfolios.get(name) or {}).get("pid"))
+                    if st.button("", key=f"pfx_{i}", use_container_width=True,
+                                 icon=":material/close:",
+                                 type="primary" if is_active else "secondary",
+                                 help=(f"Delete “{name}” and its saved copy" if saved_copy
+                                       else f"Remove “{name}”")):
+                        if saved_copy:
+                            confirm_remove_dialog(name)     # permanent, so ask first
+                        else:
+                            remove_portfolio(name)
+                            st.rerun()
+
+
+@st.dialog("Delete this portfolio?")
+def confirm_remove_dialog(name: str) -> None:
+    """Deleting a SAVED portfolio is permanent - there is no undo and the server keeps no
+    other copy - so it is confirmed. A session-only one (the sample, or anything with saving
+    off) is not: it can be added again in one click."""
+    st.markdown(f"**{_html.escape(name)}** and its saved copy will be permanently deleted. "
+                "This can't be undone.")
+    c1, c2 = st.columns(2)
+    if c1.button("Delete", type="primary", use_container_width=True, key="cfm_del"):
+        remove_portfolio(name)
+        st.rerun()
+    if c2.button("Cancel", use_container_width=True, key="cfm_cancel"):
+        st.rerun()
 
 
 def page_header(title: str, sub: str, pill: str | None = None) -> None:
@@ -860,6 +897,27 @@ def forget_portfolio(key: str) -> None:
     entry = ss.portfolios.pop(key, None)
     if entry and entry.get("pid"):
         saved_delete(entry["pid"])
+
+
+def remove_portfolio(key: str) -> None:
+    """Remove a portfolio and leave the app pointing at something valid.
+
+    Removing the one you are looking at must move to another portfolio, or - if it was the
+    only one - back to the empty state, with nothing left behind: a stale analysis, chat
+    thread or report from a portfolio that no longer exists would sit under the next page
+    as if it still described something.
+    """
+    forget_portfolio(key)
+    if ss.active == key or ss.active not in ss.portfolios:
+        if ss.portfolios:
+            activate_portfolio(next(iter(ss.portfolios)))
+        else:
+            ss.active = None
+            ss.analysis = None
+            ss.csv_text = None
+            ss.source_label = None
+            ss.report = None
+            ss.chat = []
 
 
 def open_saved(row: dict) -> bool:
@@ -1106,16 +1164,12 @@ with st.sidebar:
             with c2:
                 if st.button("", key=f"rm_{row['id']}", use_container_width=True,
                              icon=":material/delete:", help="Delete permanently"):
-                    for k, e in list(ss.portfolios.items()):
-                        if e.get("pid") == row["id"]:
-                            ss.portfolios.pop(k)
-                    saved_delete(row["id"])
-                    if ss.active not in ss.portfolios:
-                        ss.active = None
-                        if ss.portfolios:
-                            activate_portfolio(next(iter(ss.portfolios)))
-                        else:
-                            ss.analysis, ss.csv_text, ss.source_label = None, None, None
+                    loaded = next((k for k, e in ss.portfolios.items()
+                                   if e.get("pid") == row["id"]), None)
+                    if loaded:
+                        remove_portfolio(loaded)
+                    else:
+                        saved_delete(row["id"])
                     st.rerun()
 
         if ss.save_note:
