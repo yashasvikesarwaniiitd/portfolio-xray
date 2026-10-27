@@ -34,6 +34,7 @@ _MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
            "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
 
 _MF_CLIENT: Mftool | None = None
+_MF_LOCK = __import__("threading").Lock()
 
 
 def _mf() -> Mftool:
@@ -41,9 +42,12 @@ def _mf() -> Mftool:
     network (~7s), so constructing it at import made `import agent` fail without internet —
     which broke test collection and made the 'hermetic' CI job quietly network-dependent."""
     global _MF_CLIENT
-    if _MF_CLIENT is None:
-        _MF_CLIENT = Mftool()
-    return _MF_CLIENT
+    # Locked: with requests handled in worker threads, two first requests could both see None
+    # and both pay the ~7s constructor (and the second would discard the first's work).
+    with _MF_LOCK:
+        if _MF_CLIENT is None:
+            _MF_CLIENT = Mftool()
+        return _MF_CLIENT
 
 
 SYSTEM = (

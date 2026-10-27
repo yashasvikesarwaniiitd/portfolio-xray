@@ -151,7 +151,7 @@ reported separately rather than letting a sale masquerade as lost market value.
 Arrows point inward. `domain/` imports nothing but the standard library and `metrics.py`
 (itself pure, network-free math). `application/` depends on `domain` and `ports`, never on
 an adapter. That is what lets the entire loop be tested with a scripted model and canned
-tools — **457 hermetic tests, no network, no API key**.
+tools — **466 hermetic tests, no network, no API key**.
 
 An honest caveat, since updated by events: `ports/llm.py` was written as a **test seam,
 not provider independence** — `assistant_content` is handed back verbatim, so its shape was
@@ -323,6 +323,31 @@ balances" would have called that a good quarter.
 Transient vs permanent is classified **in the adapter**, where the exception actually is.
 Retrying a symbol that does not exist burns budget; giving up on a dropped socket loses an
 answer. They are different problems and they get different handling.
+
+---
+
+## 7b. One slow request must not stall the others
+
+The API runs on a small shared host. Measured live: while one `/analysis` ran (~17 s), a
+trivial `/health` took 15-20 s against a 0.4 s baseline, and an identical repeat that should have
+been a cache hit took 22 s. Cause: the endpoints were `async def` doing blocking work (market
+data downloads, the database, report generation) inline, which freezes the single event loop - so
+every other user, and the host's own health check, queued behind one analysis.
+
+Every endpoint that does blocking work is now a plain `def`, which FastAPI runs in a worker
+thread; the loop stays free. Two things keep that safe on a host with a fraction of a CPU:
+
+- **Heavy work is bounded** (`HEAVY_CONCURRENCY = 3`, a semaphore around `/analysis` and
+  `/report` compute). More at once would only make each slower and risk the host's memory.
+  A cache hit takes no slot - it never queues behind analyses.
+- **Shared state is thread-safe**: the fund-NAV client is built once under a lock (its
+  constructor costs ~7 s, so two racing threads each paying it was real), and the sector-cache
+  file is written atomically (temp file + `os.replace`) so a reader never sees a half-written file.
+
+`test_concurrency.py` measures the stall directly with an event-loop heartbeat. A timed
+`/health` after a fixed sleep would not work: the loop is blocked during the sleep, which absorbs
+the stall - the first version of the test passed against blocking code for exactly that reason. A
+sanity test confirms the harness does detect a blocking `async def`.
 
 ---
 

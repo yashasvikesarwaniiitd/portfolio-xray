@@ -684,7 +684,7 @@ def test_the_generated_report_is_deleted_after_it_is_sent():
     disk for good. A BackgroundTask now removes it once the response has been sent."""
     import inspect
     import api
-    src = inspect.getsource(api.report)
+    src = inspect.getsource(api._report_compute)
     assert "background=BackgroundTask(_quiet_unlink, out.name)" in src
     # and if generation raises, no response carries that task, so it must be cleaned inline
     assert "if not delivered:" in src
@@ -693,7 +693,7 @@ def test_the_generated_report_is_deleted_after_it_is_sent():
 def test_the_uploaded_csv_is_deleted_on_every_upload_endpoint():
     import inspect
     import api
-    for fn in (api.overview, api.analysis, api.report):
+    for fn in (api.overview, api._analysis_compute, api._report_compute):
         src = inspect.getsource(fn)
         assert "if is_temp:" in src and "_quiet_unlink(path)" in src, fn.__name__
 

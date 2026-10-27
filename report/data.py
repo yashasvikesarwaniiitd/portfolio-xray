@@ -69,10 +69,25 @@ def _load_cache() -> dict:
     return merged
 
 
+_CACHE_WRITE_LOCK = __import__("threading").Lock()
+
+
 def _save_cache(cache: dict) -> None:
+    """Write the runtime cache atomically.
+
+    Analyses now run concurrently in worker threads, and every one of them rewrites this file.
+    Opening it with "w" truncates it first, so two writers interleaving - or a reader arriving
+    mid-write - would see a half-written file: corrupt JSON, which _load_cache then silently
+    treats as "no cache". Writing to a temp file and renaming it over the real one is atomic,
+    so a reader sees the whole old file or the whole new one, never a fragment; the lock keeps
+    two writers from racing on the temp file itself.
+    """
     try:
-        with open(CACHE_PATH, "w", encoding="utf-8") as f:
-            json.dump(cache, f)
+        with _CACHE_WRITE_LOCK:
+            tmp = f"{CACHE_PATH}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cache, f)
+            os.replace(tmp, CACHE_PATH)
     except Exception:
         pass
 

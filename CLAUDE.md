@@ -104,3 +104,6 @@ yfinance, mftool/AMFI, SQLite logging, FastAPI + Streamlit.
   adapter and no SDK, so the whole agent loop stays testable with a scripted model.
   A finding reaches the user only if `verify_finding` passes - prompts are not a
   safety mechanism on their own. See ARCHITECTURE.md.
+- API endpoints that do blocking work (market data, DB, reports) are plain `def`, never
+  `async def`: a blocking call inside `async def` freezes the event loop and stalls every other
+  request, `/health` included. Heavy work also takes a `_HEAVY` slot; `test_concurrency.py` guards this.

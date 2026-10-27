@@ -22,7 +22,7 @@ from datetime import date
 
 import anthropic
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, UploadFile
+from fastapi import Body, FastAPI, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
@@ -37,6 +37,18 @@ CHAT_LIMIT_PER_DAY = 20
 REPORTS_PER_DAY = 3
 HOLDINGS_CAP = 60
 MESSAGE_CAP = 500
+
+# CONCURRENCY. Every endpoint that does real work is a plain `def`, which FastAPI runs in a
+# worker thread. They were `async def` doing blocking work inline - market-data downloads,
+# parsing, database round trips, LLM calls - and a blocking call inside `async def` stops the
+# whole event loop: while one analysis ran, a trivial /health took 15-20s (measured on the live
+# backend), so a second user, a cache hit and Render's own health check all waited behind it.
+#
+# Threads fix the blocking but invite the opposite problem on a small host: many analyses at
+# once, each holding a portfolio's data in memory. So the genuinely heavy ones take a slot from
+# a small pool; the rest of the requests (and every cache hit) never wait for one.
+HEAVY_CONCURRENCY = 3
+_HEAVY = threading.BoundedSemaphore(HEAVY_CONCURRENCY)
 
 load_dotenv()
 app = FastAPI(title="Portfolio X-Ray API", version=VERSION)
@@ -180,10 +192,13 @@ def _csv_to_temp(csv_text: str) -> str:
     return f.name
 
 
-async def _portfolio_path_from(request: Request, file: UploadFile | None) -> tuple[str, bool]:
-    """(path, is_temp). Uploaded CSV wins; otherwise the server's default (sample)."""
+def _portfolio_path_from(request: Request, file: UploadFile | None) -> tuple[str, bool]:
+    """(path, is_temp). Uploaded CSV wins; otherwise the server's default (sample).
+
+    Synchronous: it runs inside a worker thread, where `file.file` is a plain blocking file
+    object, so there is nothing to await."""
     if file is not None:
-        raw = (await file.read()).decode("utf-8", errors="replace")
+        raw = file.file.read().decode("utf-8", errors="replace")
         return _csv_to_temp(raw), True
     return agent.DEFAULT_PORTFOLIO, False
 
@@ -212,8 +227,7 @@ def stats():
 
 
 @app.post("/chat")
-async def chat(request: Request):
-    body = await request.json()
+def chat(request: Request, body: dict = Body(...)):
     message = str(body.get("message", "")).strip()
     history = body.get("history") or []
     if not message:
@@ -265,11 +279,11 @@ def digest():
 
 @app.post("/overview")
 @app.get("/overview")
-async def overview(request: Request, file: UploadFile | None = None):
+def overview(request: Request, file: UploadFile | None = None):
     """Dashboard payload in ONE reconstruction pass: snapshot + portfolio XIRR +
     concentration (weights/HHI/effective bets) — no LLM involved, so it's free to serve."""
     try:
-        path, is_temp = await _portfolio_path_from(request, file)
+        path, is_temp = _portfolio_path_from(request, file)
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     try:
@@ -328,7 +342,7 @@ def _nifty_window_return(first_flow: date | None, holdings: list | None = None,
 
 @app.post("/analysis")
 @app.get("/analysis")
-async def analysis(request: Request, file: UploadFile | None = None):
+def analysis(request: Request, file: UploadFile | None = None):
     """Everything the dashboard needs, in one deterministic call: snapshot + month-end value
     timeline + the report engine's computed sections (allocation, diversification,
     concentration, overlap, cost, questions) + a market reference. No LLM, so it's free to
@@ -336,8 +350,8 @@ async def analysis(request: Request, file: UploadFile | None = None):
     key = None
     try:
         if file is not None:
-            raw = await file.read()
-            await file.seek(0)               # _portfolio_path_from reads it again
+            raw = file.file.read()
+            file.file.seek(0)                # _portfolio_path_from reads it again
             key = "upload:" + hashlib.sha256(raw).hexdigest()
         else:
             key = f"default:{agent.DEFAULT_PORTFOLIO}:{os.path.getmtime(agent.DEFAULT_PORTFOLIO)}"
@@ -346,9 +360,14 @@ async def analysis(request: Request, file: UploadFile | None = None):
     if key:
         hit = _cache_get(key)
         if hit is not None:
-            return hit
+            return hit                       # never waits for a heavy slot
+    with _HEAVY:
+        return _analysis_compute(request, file, key)
+
+
+def _analysis_compute(request: Request, file: UploadFile | None, key: str | None):
     try:
-        path, is_temp = await _portfolio_path_from(request, file)
+        path, is_temp = _portfolio_path_from(request, file)
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     try:
@@ -422,12 +441,17 @@ async def analysis(request: Request, file: UploadFile | None = None):
 
 
 @app.post("/report")
-async def report(request: Request, file: UploadFile | None = None, no_ai: int = 0):
+def report(request: Request, file: UploadFile | None = None, no_ai: int = 0):
     ip = request.client.host if request.client else "unknown"
     if not _bump(ip, "report", REPORTS_PER_DAY):
         return _friendly_limit("health reports", REPORTS_PER_DAY)
+    with _HEAVY:
+        return _report_compute(request, file, no_ai)
+
+
+def _report_compute(request: Request, file: UploadFile | None, no_ai: int):
     try:
-        path, is_temp = await _portfolio_path_from(request, file)
+        path, is_temp = _portfolio_path_from(request, file)
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     out = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
@@ -517,13 +541,12 @@ def storage_status():
 
 
 @app.post("/portfolios")
-async def portfolios_save(request: Request):
+def portfolios_save(request: Request, body: dict = Body(...)):
     if not storage.configured():
         return JSONResponse(status_code=503, content={"error": "Saving is not switched on."})
     key = _owner(request)
     if not key:
         return JSONResponse(status_code=400, content={"error": "No owner key."})
-    body = await request.json()
     csv_text = str(body.get("csv_text") or "")
     if not csv_text.strip():
         return JSONResponse(status_code=400, content={"error": "Nothing to save."})
@@ -558,11 +581,10 @@ def portfolios_load(pid: str, request: Request):
 
 
 @app.put("/portfolios/{pid}")
-async def portfolios_update(pid: str, request: Request):
+def portfolios_update(pid: str, request: Request, body: dict = Body(...)):
     """Replace a saved portfolio's contents and/or rename it, in place."""
     if not storage.configured():
         return JSONResponse(status_code=503, content={"error": "Saving is not switched on."})
-    body = await request.json()
     name = body.get("name")
     csv_text = body.get("csv_text")
     if csv_text is not None:
@@ -579,7 +601,7 @@ async def portfolios_update(pid: str, request: Request):
 
 
 @app.post("/convert")
-async def convert_workbook(file: UploadFile):
+def convert_workbook(file: UploadFile):
     """Turn an uploaded Excel workbook into portfolio text, ready for /analysis or /merge.
 
     Everything downstream speaks CSV text, so Excel support is a translation at the door
@@ -591,7 +613,7 @@ async def convert_workbook(file: UploadFile):
     server down; the extra byte is what tells "exactly at the limit" from "over it".
     """
     import excel_import
-    data = await file.read(excel_import.MAX_BYTES + 1)
+    data = file.file.read(excel_import.MAX_BYTES + 1)
     try:
         text, report = excel_import.workbook_to_text(data)
         _quiet_unlink(_csv_to_temp(text))       # the engine must be able to read the result
@@ -601,7 +623,7 @@ async def convert_workbook(file: UploadFile):
 
 
 @app.post("/merge")
-async def merge_portfolio(request: Request):
+def merge_portfolio(body: dict = Body(...)):
     """Fold an uploaded file into an existing portfolio's text, without double-counting.
 
     Stateless on purpose: the browser already holds the portfolio's text, so the server
@@ -610,7 +632,6 @@ async def merge_portfolio(request: Request):
     analyse - the caller sends the result to /analysis, which keeps this call free of any
     market-data network traffic.
     """
-    body = await request.json()
     existing = str(body.get("existing_csv") or "")
     incoming = str(body.get("incoming_csv") or "")
     if not incoming.strip():
