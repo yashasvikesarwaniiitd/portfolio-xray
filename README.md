@@ -225,7 +225,7 @@ case that passes today still passes on Monday. Full table in
 | Check | Result |
 |---|---|
 | Heavy cases on `claude-haiku-5-5` | **3/3 passed** (incl. fault injection: `beta` broken on purpose → the agent routed to `sharpe` rather than inventing a number) |
-| **Tool-sequence divergence** | **7 of 8 runs differed**, but the direction is 4–3 — a coin flip as to which portfolio gets the deeper investigation. Rules out a fixed script (`openai/gpt-oss-120b` produced the *same* sequence every time); does **not** establish evidence-driven adaptation. `--divergence-runs 3` reports a rate. |
+| **Tool-sequence divergence** | **3 of 3 runs differed** on the current 17-tool build; **7 of 8** on the 13-tool one before it, where the direction was 4–3 — a coin flip as to which portfolio gets the deeper investigation. Rules out a fixed script (`openai/gpt-oss-120b` produced the *same* sequence every time); does **not** establish evidence-driven adaptation, and 3 runs is a rate, not a proof. Always `--divergence-runs 3` — a single run has reported both PASS and FAIL on the same build. |
 | Light cases on Groq free tier | passed |
 
 The divergence check is the one that makes *"this is an agent, not a script"* falsifiable:
