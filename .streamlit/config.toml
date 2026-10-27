@@ -1,11 +1,26 @@
-# Design tokens from the approved Claude Design (warm paper / ink / rust palette).
+# Design tokens for the Portfolio X-Ray redesign (obsidian / chartreuse / ice palette).
 # Safe to commit — secrets live in .streamlit/secrets.toml, which is gitignored.
 [theme]
-base = "light"
-primaryColor = "#8C2F27"
-backgroundColor = "#FAF7F2"
-secondaryBackgroundColor = "#FFFFFF"
-textColor = "#241F1C"
+base = "dark"
+primaryColor = "#D4FF3F"
+backgroundColor = "#0B0C0E"
+secondaryBackgroundColor = "#161A1F"
+textColor = "#ECEFF2"
+linkColor = "#9AD7FF"
+borderColor = "#2D323A"
+dataframeBorderColor = "#22262D"
+dataframeHeaderBackgroundColor = "#111418"
+redColor = "#FF7D61"
+yellowColor = "#F4C152"
+blueColor = "#9AD7FF"
+greenColor = "#D4FF3F"
+baseRadius = "10px"
+font = "Schibsted Grotesk:https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400..800&display=swap"
+codeFont = "Geist Mono:https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400..600&display=swap"
+
+[theme.sidebar]
+backgroundColor = "#0E1013"
+secondaryBackgroundColor = "#161A1F"
 
 [client]
 toolbarMode = "minimal"
