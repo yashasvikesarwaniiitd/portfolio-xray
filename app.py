@@ -146,6 +146,49 @@ header[data-testid="stHeader"] { background: transparent; }
 .rail-card .b { font-size: 12.5px; color: var(--ink3); line-height: 1.5; margin-top: 5px; }
 .rail-foot { font-size: 12px; color: var(--ink3); line-height: 1.55; margin-top: 16px; }
 
+/* ---------- portfolio switcher ---------- */
+.sw { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; }
+.sw-l { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--ink3); }
+.block-container [class*="st-key-pf_"] .stButton > button {
+  min-height: 36px; border-radius: 999px; font-size: 13.5px; font-weight: 500;
+  border: 1px solid var(--line2); background: var(--bg1); color: var(--ink2);
+}
+.block-container [class*="st-key-pf_"] .stButton > button:hover {
+  background: var(--bg2); color: var(--ink1); border-color: var(--ink4);
+}
+/* The active book is stated in the same lime the rail uses for the active page, so
+   "which portfolio am I looking at" reads the same way as "which page am I on". */
+.block-container [class*="st-key-pf_"] .stButton > button[kind="primary"] {
+  background: var(--lime); color: var(--lime-ink); border-color: var(--lime);
+  font-weight: 600;
+}
+.block-container [class*="st-key-pf_"] .stButton > button[kind="primary"]:hover {
+  background: #E2FF7A; color: var(--lime-ink);
+}
+.block-container [class*="st-key-pf_del"] .stButton > button {
+  min-height: 32px; border-radius: 8px; font-size: 12.5px; color: var(--ink3);
+  background: transparent; border: 1px solid var(--line);
+}
+.block-container [class*="st-key-pf_del"] .stButton > button:hover {
+  color: var(--coral); border-color: var(--coral); background: transparent;
+}
+/* The uploader is the SECOND of two equal ways to add a portfolio, so it is sized like
+   the first rather than left as Streamlit's small inset button in a tall dropzone. */
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
+  padding: 8px; min-height: 0; background: var(--bg1);
+}
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] small,
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] svg { display: none; }
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] > div { width: 100%; }
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button {
+  width: 100%; min-height: 38px; border-radius: 8px; font-size: 14px; font-weight: 500;
+  border: 1px solid var(--line2); background: transparent; color: var(--ink1);
+}
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button:hover {
+  background: var(--bg3); border-color: var(--ink4); color: var(--ink1);
+}
+
 /* ---------- page header ---------- */
 .page-h { display: flex; align-items: flex-end; justify-content: space-between;
   gap: 16px 24px; flex-wrap: wrap; border-bottom: 1px solid var(--line);
@@ -444,6 +487,47 @@ def insight(title: str, value: str, body: str, tone: str = "medium") -> str:
             f'<div class="b">{_html.escape(body)}</div></div>')
 
 
+def portfolio_switcher() -> None:
+    """The book the whole app is about, switchable in one click, at the top of every page.
+
+    Buttons rather than st.radio or a segmented control: a radio keeps its own state under
+    its key, that state beats the `index=` argument, and writing to the key to keep them in
+    step raises StreamlitAPIException once the widget has been created earlier in the same
+    run — which the rail always has. Buttons hold no state to fight.
+
+    Switching only re-points ss.analysis at an already-fetched result, so it costs nothing
+    and refetches nothing. Both pages read ss.analysis and ss.csv_text, so the dashboard
+    and the analyst move together by construction rather than by remembering to.
+    """
+    if not ss.portfolios:
+        return
+    names = list(ss.portfolios)
+    st.markdown('<div class="sw"><span class="sw-l">Portfolio</span></div>',
+                unsafe_allow_html=True)
+    # Fixed-width columns so pills keep a readable size rather than stretching to fill the
+    # row: two portfolios should not become two half-page buttons. Remove takes the slot
+    # straight after the last pill, so it reads as part of the same control instead of
+    # claiming a row of its own above the page title.
+    per_row = 4
+    cells = names + (["·remove·"] if len(names) > 1 else [])
+    for start in range(0, len(cells), per_row):
+        chunk = cells[start:start + per_row]
+        cols = st.columns(per_row)
+        for col, name in zip(cols, chunk):
+            with col:
+                if name == "·remove·":
+                    if st.button("Remove", key="pf_del", use_container_width=True,
+                                 icon=":material/close:",
+                                 help=f"Forget “{ss.active}” in this browser session"):
+                        ss.portfolios.pop(ss.active, None)
+                        activate_portfolio(next(iter(ss.portfolios)))
+                        st.rerun()
+                elif st.button(name, key=f"pf_{name}", use_container_width=True,
+                               type="primary" if name == ss.active else "secondary"):
+                    activate_portfolio(name)
+                    st.rerun()
+
+
 def page_header(title: str, sub: str, pill: str | None = None) -> None:
     p = (f'<div class="pill"><span class="dot"></span>{_html.escape(pill)}</div>'
          if pill else "")
@@ -459,6 +543,13 @@ ss.setdefault("page", "ask")
 ss.setdefault("analysis", None)
 ss.setdefault("source_label", None)
 ss.setdefault("csv_text", None)      # user's own portfolio, held in memory only
+# Several named portfolios, so one person can compare their own book against a sample, a
+# spouse's, or a what-if. Held ONLY in this browser session: nothing is written server
+# side, which is what keeps the "nothing you upload is stored" promise true. They are lost
+# on refresh, and that is the trade being made deliberately.
+ss.setdefault("portfolios", {})      # name -> {csv_text, analysis, label}
+ss.setdefault("active", None)
+ss.setdefault("rail_upload_sig", None)   # the last file the rail uploader tried
 ss.setdefault("chat", [])
 ss.setdefault("queued", None)
 ss.setdefault("pending", None)   # question awaiting an answer (already shown in the thread)
@@ -472,7 +563,40 @@ MARKETS = ["India", "US", "Global"]
 RISKS = ["Low", "Med", "High"]
 
 
-def load_analysis(csv_text: str | None, label: str) -> bool:
+def activate_portfolio(name: str) -> None:
+    """Point the rest of the app at one of the loaded portfolios.
+
+    Everything downstream still reads ss.analysis / ss.csv_text, so switching costs
+    nothing and refetches nothing — the analysis was already paid for when it loaded.
+
+    The chat is cleared on purpose. A thread is about one book: carrying "your biggest
+    position is Reliance at 26%" over to a portfolio that does not hold Reliance would
+    put stale figures under a new heading, and the model would answer follow-ups from
+    them. The report is dropped for the same reason.
+    """
+    entry = ss.portfolios.get(name)
+    if not entry:
+        return
+    ss.active = name
+    ss.analysis = entry["analysis"]
+    ss.csv_text = entry["csv_text"]
+    ss.source_label = entry["label"]
+    ss.report = None
+    ss.chat = []
+
+
+def unique_name(base: str) -> str:
+    """Loading two files both called "portfolio" must not silently replace the first."""
+    name = (base or "Portfolio").strip() or "Portfolio"
+    if name not in ss.portfolios:
+        return name
+    i = 2
+    while f"{name} ({i})" in ss.portfolios:
+        i += 1
+    return f"{name} ({i})"
+
+
+def load_analysis(csv_text: str | None, label: str, name: str | None = None) -> bool:
     """True if the portfolio loaded. The caller MUST NOT rerun on False.
 
     It used to return None and every caller rerun unconditionally, which repainted the page
@@ -491,8 +615,9 @@ def load_analysis(csv_text: str | None, label: str) -> bool:
             code, data = call_json("GET", "/analysis", cold_slot=slot)
     slot.empty()
     if code == 200 and "snapshot" in data:
-        ss.analysis, ss.source_label, ss.csv_text = data, label, csv_text
-        ss.report = None
+        key = unique_name(name or label)
+        ss.portfolios[key] = {"csv_text": csv_text, "analysis": data, "label": label}
+        activate_portfolio(key)
         ss.page = "analysis"
         return True
     # code 0 means the request never reached a server, so `data["error"]` is requests'
@@ -571,13 +696,38 @@ with st.sidebar:
             f'{ss.analysis["level"]}</div></div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="rail-card"><div class="t">Nothing loaded yet</div>'
-                    '<div class="b">Start with the sample portfolio — one click, no '
-                    'typing.</div></div>', unsafe_allow_html=True)
-        st.write("")
+                    '<div class="b">Start with the sample portfolio, or bring your '
+                    'own.</div></div>', unsafe_allow_html=True)
+
+    # --- adding a portfolio ---------------------------------------------------------
+    # Both routes live here, together, and stay here once something is loaded. Before,
+    # the sample button vanished after the first load, so there was no way to pull the
+    # sample in as a SECOND portfolio to compare your own book against — which is most
+    # of the point of having several.
+    st.markdown('<div class="rail-hr"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="rail-label">Add a portfolio</div>', unsafe_allow_html=True)
+
+    if "Sample" not in ss.portfolios:
         if st.button("Load the sample", key="rail_sample", use_container_width=True,
-                     type="primary"):
-            if load_analysis(None, "Sample portfolio"):
+                     type="primary" if not ss.portfolios else "secondary"):
+            if load_analysis(None, "Sample portfolio", name="Sample"):
                 st.rerun()
+
+    up = st.file_uploader("Upload a CSV", type=["csv"], key="rail_upload",
+                          label_visibility="collapsed")
+    if up is not None:
+        # Attempt each distinct file ONCE. The widget keeps handing the same file back on
+        # every rerun, so without this a rejected CSV would retry forever and the error
+        # it produced would be redrawn on top of itself.
+        sig = (up.name, up.size)
+        if sig != ss.rail_upload_sig:
+            ss.rail_upload_sig = sig
+            stem = os.path.splitext(up.name)[0][:28] or "Portfolio"
+            if load_analysis(up.getvalue().decode("utf-8", "replace"),
+                             "Your portfolio (not stored)", name=stem):
+                st.rerun()
+    st.markdown('<div class="rail-cap">A Groww equity or mutual-fund transaction report, '
+                'or the SIP sheet. Held in this tab only.</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="rail-foot">Educational only — not advice, not '
                 'SEBI-registered. Nothing you upload is stored.</div>',
@@ -587,6 +737,7 @@ with st.sidebar:
 # ---------------------------------------------------------------- page: ask
 
 def page_ask() -> None:
+    portfolio_switcher()
     n = ss.analysis["holdings_total"] if ss.analysis else None
     page_header("Ask the analyst",
                 "Plain questions about your portfolio. Plain answers, with the numbers "
@@ -637,9 +788,16 @@ def page_ask() -> None:
         slot = st.empty()
         # History excludes the pending question — the backend appends it itself.
         history = [{"role": r, "content": t} for r, t, _ in ss.chat[:-1]]
+        payload = {"message": ss.pending, "history": history}
+        # Without this the backend falls back to the SERVER's default portfolio, so the
+        # analyst answers about the sample while the dashboard beside it shows the user's
+        # own book — two different portfolios described as one. /chat accepts the CSV in
+        # the body exactly as /analysis does; the file lives in memory for one request and
+        # is deleted in a finally, which is what keeps "nothing is stored" true.
+        if ss.csv_text:
+            payload["portfolio_csv"] = ss.csv_text
         with st.spinner("Working…"):
-            code, data = call_json("POST", "/chat", cold_slot=slot,
-                                   json={"message": ss.pending, "history": history})
+            code, data = call_json("POST", "/chat", cold_slot=slot, json=payload)
         slot.empty()
         answer = data.get("answer", "The backend is unreachable — give the free tier "
                                     "~30s and retry.")
@@ -672,6 +830,7 @@ def page_ask() -> None:
 # ---------------------------------------------------------------- page: analysis
 
 def page_analysis() -> None:
+    portfolio_switcher()
     if not ss.analysis:
         page_header("Portfolio analysis", "Nothing loaded yet.")
         st.markdown('<div class="card"><div class="sec-t">Load a portfolio to see this'
@@ -682,7 +841,7 @@ def page_analysis() -> None:
         st.write("")
         c1, c2 = st.columns([1, 3])
         if c1.button("Load the sample", type="primary", use_container_width=True):
-            if load_analysis(None, "Sample portfolio"):
+            if load_analysis(None, "Sample portfolio", name="Sample"):
                 st.rerun()
         if c2.button("Enter my own holdings", use_container_width=True):
             ss.page = "holdings"
@@ -958,7 +1117,8 @@ def page_holdings() -> None:
     with c1:
         if st.button("Analyse my portfolio →", type="primary", use_container_width=True,
                      disabled=ready == 0):
-            if load_analysis(csv_text, "Your portfolio (not stored)"):
+            if load_analysis(csv_text, "Your portfolio (not stored)",
+                             name="Typed holdings"):
                 st.rerun()
     with c2:
         st.download_button("Blank template", data=csv_text if ready else
@@ -988,7 +1148,8 @@ def page_holdings() -> None:
             if not payload:
                 st.warning("Upload or paste a CSV first.")
             else:
-                if load_analysis(payload, "Your portfolio (not stored)"):
+                if load_analysis(payload, "Your portfolio (not stored)",
+                                 name="Pasted CSV"):
                     st.rerun()
 
 
